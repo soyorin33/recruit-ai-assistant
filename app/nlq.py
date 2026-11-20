@@ -14,7 +14,7 @@ from .analytics import funnel, period_range
 from .config import now, settings
 from .db import db, ts
 from .domain import (
-    CHANNEL_PATTERNS, CHANNELS, POSITION_PATTERNS, POSITIONS, ROUND_TO_STAGE, STAGES, STATUSES, mask_phone,
+    CHANNEL_PATTERNS, CHANNELS, FIELD_LABELS, POSITION_PATTERNS, POSITIONS, ROUND_TO_STAGE, STAGES, STATUSES, mask_phone,
     match_dict,
 )
 
@@ -152,7 +152,7 @@ def execute(plan: dict) -> dict:
         result["candidate"] = {**r, "phone": mask_phone(r.get("phone"))}
         result["table"] = {"columns": ["时间", "操作人", "变更"],
                            "rows": [[e["ts"][5:16], e["operator"] or "",
-                                     "；".join(f"{k}:{v[1]}" for k, v in e["changes"].items()
+                                     "；".join(f"{FIELD_LABELS.get(k, k)}：{v[1]}" for k, v in e["changes"].items()
                                               if k in ("stage", "status", "interview_time", "feedback") and v[1])]
                                     for e in events]}
     else:
@@ -190,10 +190,11 @@ def template_answer(q: str, plan: dict, res: dict) -> str:
     return f"{cond}：共 {res['count']} 人" + (f"，包括 {names}" + (" 等" if res["count"] > 8 else "") if names else "") + "。"
 
 
-def answer(q: str) -> dict:
+def answer(q: str, use_llm: bool = True) -> dict:
     engine = "rules"
     plan = None
-    if settings.llm_enabled:
+    use_llm = use_llm and settings.llm_enabled
+    if use_llm:
         try:
             plan, engine = llm_plan(q), "llm"
         except llm.LLMError as e:
@@ -201,7 +202,7 @@ def answer(q: str) -> dict:
     plan = plan or rules_plan(q)
     res = execute(plan)
     text = template_answer(q, plan, res)
-    if settings.llm_enabled and engine == "llm":
+    if use_llm and engine == "llm":
         try:
             brief = {k: v for k, v in res.items() if k not in ("chart",)}
             brief["table"] = {**res["table"], "rows": res["table"]["rows"][:20]}
@@ -212,4 +213,5 @@ def answer(q: str) -> dict:
         except llm.LLMError as e:
             log.warning("问数回答生成失败，使用模板：%s", e)
     return {"text": text, "table": res.get("table"), "chart": res.get("chart"),
-            "query": {"plan": plan, "engine": engine, "count": res["count"]}}
+            "query": {"plan": plan, "engine": engine, "count": res["count"]},
+            "candidate_id": (res.get("candidate") or {}).get("id")}

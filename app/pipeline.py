@@ -3,24 +3,30 @@ from __future__ import annotations
 
 import io
 import logging
-from datetime import datetime
+import re
+from datetime import datetime, timedelta
 
 from . import bus
-from .config import settings
+from .config import now, settings
 from .db import db
 from .domain import (
     FIELD_LABELS, STAGE_INDEX, STATUS_ACTIVE, STATUS_DROPPED, STATUS_HIRED, STATUS_REJECTED, mask_phone,
 )
 from .extractor import extract_message, extract_resume
+from .llm import LLMError
 
 log = logging.getLogger("pipeline")
 CLOSED = {STATUS_REJECTED, STATUS_DROPPED, STATUS_HIRED}
 WEEK = "一二三四五六日"
 
+CONTEXT_HOURS = 6  # 多轮上下文的有效期：超过这个时间的对话不再用于理解指代
+PRONOUN_RE = re.compile(r"(?<![其吉])(他|她)(?![们人])|这位候选人|这个候选人|该候选人|这个人|此人|刚才那个人?")
+
 HELP_TEXT = (
     "我是招聘助手，直接用大白话告诉我候选人进展即可，例如：\n"
     "· 张三 Java后端 BOSS来的，今天一面过了，周五下午二面，面试官李四\n"
     "· 王芳二面挂了，算法基础薄弱；赵磊接了offer\n"
+    "· 支持连续对话：「把他的二面改到后天上午10点」「他现在什么情况？」\n"
     "· 本周各岗位进了几个复试？\n"
     "· 发一下今天的日报\n"
     "也可以直接把简历（PDF/TXT）发给我，自动建档。"
@@ -49,12 +55,20 @@ def known_candidates() -> list[dict]:
 
 # ---------------- 实体对齐 + 变更计划 ----------------
 def plan_change(c: dict) -> dict:
+    c = dict(c)
     reasons: list[str] = []
     existing = None
-    if c.get("phone"):
+    cid = c.pop("candidate_id", None)
+    if cid:  # 智能体通过上下文 / 搜索拿到的编号，优先使用
+        existing = db.get_candidate(int(cid))
+        if existing is None:
+            reasons.append(f"编号 #{cid} 不存在，将按新候选人处理")
+        elif existing["name"] != c["name"]:
+            reasons.append(f"编号 #{cid} 对应的是「{existing['name']}」，与「{c['name']}」不一致，请确认")
+    if existing is None and c.get("phone"):
         hits = db.find_by_phone(c["phone"])
         existing = hits[0] if hits else None
-    if existing is None:
+    if existing is None and not cid:
         hits = db.find_by_name(c["name"])
         if c.get("position") and len(hits) >= 1:
             same_pos = [h for h in hits if h.get("position") in (c["position"], None, "")]
@@ -146,24 +160,101 @@ def describe_plan(plan: dict, cand: dict | None = None) -> str:
     return f"{plan['name']}　" + "；".join(parts)
 
 
+# ---------------- 多轮上下文 ----------------
+def conversation(operator: str, limit: int = 12) -> tuple[list[dict], list[int]]:
+    """返回 (该 HR 最近的对话历史[OpenAI messages 格式], 最近提及的候选人编号[新→旧])。
+
+    记忆直接从消息表还原（无状态、重启不丢），超过 CONTEXT_HOURS 的旧对话不参与。
+    """
+    since = (now() - timedelta(hours=CONTEXT_HOURS)).strftime("%Y-%m-%d %H:%M:%S")
+    rows = [m for m in db.recent_messages(80) if m["ts"] >= since and (
+        (m["role"] == "user" and m["operator"] == operator)
+        or (m["role"] == "bot" and m["payload"].get("to", operator) == operator))]
+    focus: list[int] = []
+    for m in reversed(rows):
+        p = m["payload"]
+        ids = p.get("focus") or [a["candidate"]["id"] for a in p.get("actions", []) if a.get("candidate")]
+        focus += [i for i in ids if i not in focus]
+    history = []
+    for m in rows[-limit:]:
+        content = (m["text"] or "")[:300]
+        if m["role"] == "bot" and m["payload"].get("focus"):
+            names = [c["name"] for c in (db.get_candidate(i) for i in m["payload"]["focus"][:3]) if c]
+            content += f"\n（涉及候选人：{'、'.join(f'#{i} {n}' for i, n in zip(m['payload']['focus'], names))}）"
+        history.append({"role": "user" if m["role"] == "user" else "assistant", "content": content})
+    return history, focus[:6]
+
+
+def resolve_pronoun(text: str, focus: list[int]) -> tuple[str, str | None]:
+    """规则模式下的指代消解：消息里没有出现任何已知姓名、但有「他/她/这个人」时，替换为最近提及的候选人。"""
+    if not focus or not PRONOUN_RE.search(text):
+        return text, None
+    names = {r["name"] for r in db.q("SELECT DISTINCT name FROM candidates")}
+    if any(n in text for n in names):
+        return text, None
+    target = db.get_candidate(focus[0])
+    if not target:
+        return text, None
+    m = PRONOUN_RE.search(text)
+    return PRONOUN_RE.sub(target["name"], text, count=1), f"「{m.group(0)}」→ {target['name']}"
+
+
+def _focus_of(payload: dict) -> list[int]:
+    ids = [a["candidate"]["id"] for a in payload.get("actions", []) if a.get("candidate")]
+    for a in payload.get("actions", []):
+        ids += [p["candidate_id"] for p in a.get("plans", []) if p.get("candidate_id")]
+    if payload.get("candidate_id"):
+        ids.append(payload["candidate_id"])
+    return list(dict.fromkeys(ids))
+
+
 # ---------------- 消息入口 ----------------
 def handle_message(text: str, operator: str = "HR", source: str = "web") -> dict:
-    """处理一条 HR 消息，返回机器人回复消息（已入库并推送）。"""
+    """处理一条 HR 消息，返回机器人回复消息（已入库并推送）。
+
+    配置了大模型 → 智能体（Function Calling + 多轮记忆）；未配置或调用失败 → 规则引擎（含指代消解）。
+    """
+    history, focus = conversation(operator)
     db.add_message("user", text, operator=operator, source=source)
     bus.publish("message", {})
     try:
-        payload = _dispatch(text, operator, source)
+        payload = _route(text, operator, source, history, focus)
     except Exception as e:  # 兜底：任何异常都要给 HR 明确反馈，而不是沉默
         log.exception("处理消息失败")
         payload = {"kind": "error", "text": f"处理失败：{e}，请稍后重试或换个说法。"}
+    payload["to"] = operator
+    payload.setdefault("focus", _focus_of(payload))
     msg = db.add_message("bot", payload.pop("text"), operator="招聘助手", source=source, payload=payload)
     bus.publish("message", {})
     return msg
 
 
-def _dispatch(text: str, operator: str, source: str) -> dict:
-    ex = extract_message(text, known_candidates())
+def _route(text: str, operator: str, source: str, history: list[dict], focus: list[int]) -> dict:
+    bare = re.sub(r"@\S+\s*", "", text).strip().lower().rstrip("。!！")
+    from .extractor import CANCEL_WORDS, CONFIRM_WORDS
+    if settings.llm_enabled and bare not in CONFIRM_WORDS | CANCEL_WORDS:
+        from . import agent
+        try:
+            return agent.run(text, operator, source, history, focus)
+        except LLMError as e:
+            log.warning("智能体不可用，降级规则引擎：%s", e)
+            payload = _dispatch(text, operator, source, focus, use_llm=False)
+            payload.setdefault("extraction", {})["fallback_reason"] = str(e)[:120]
+            return payload
+    return _dispatch(text, operator, source, focus)
+
+
+def _dispatch(text: str, operator: str, source: str, focus: list[int] | None = None,
+              use_llm: bool = True) -> dict:
+    resolved, coref = resolve_pronoun(text, focus or [])
+    if use_llm:
+        ex = extract_message(resolved, known_candidates())
+    else:  # 智能体刚失败（多半是模型不可用），不再重复调用大模型
+        from .extractor import rules_extract_message
+        ex = rules_extract_message(resolved, known_candidates())
     meta = {k: ex.get(k) for k in ("intent", "candidates", "confidence", "engine", "llm_meta", "fallback_reason")}
+    if coref:
+        meta["coreference"] = coref
     intent = ex["intent"]
 
     if intent in ("confirm", "cancel"):
@@ -174,9 +265,9 @@ def _dispatch(text: str, operator: str, source: str) -> dict:
 
     if intent == "query":
         from . import nlq
-        ans = nlq.answer(ex.get("question") or text)
+        ans = nlq.answer(ex.get("question") or resolved, use_llm=use_llm)
         return {"kind": "query", "text": ans["text"], "table": ans.get("table"), "chart": ans.get("chart"),
-                "extraction": meta, "query": ans.get("query")}
+                "extraction": meta, "query": ans.get("query"), "candidate_id": ans.get("candidate_id")}
 
     if intent == "report":
         from . import report

@@ -74,6 +74,32 @@ def chat(messages: list[dict], *, json_mode: bool = False, temperature: float = 
     return content, meta
 
 
+def chat_tools(messages: list[dict], tools: list[dict], *, temperature: float = 0.1,
+               max_tokens: int = 1200) -> tuple[dict, dict]:
+    """Function Calling：返回 (assistant 消息 dict，可能包含 tool_calls, 用量信息)。
+
+    使用 OpenAI 标准 tools 协议，DeepSeek / 通义 / 混元 / Kimi 的兼容接口均支持。
+    """
+    if not settings.llm_enabled:
+        raise LLMError("未配置 LLM_API_KEY")
+    body = {"model": settings.llm_model, "messages": messages, "tools": tools, "tool_choice": "auto",
+            "temperature": temperature, "max_tokens": max_tokens}
+    t0 = time.time()
+    try:
+        resp = httpx.post(f"{settings.llm_base_url}/chat/completions",
+                          headers={"Authorization": f"Bearer {settings.llm_api_key}"},
+                          json=body, timeout=settings.llm_timeout)
+        resp.raise_for_status()
+        data = resp.json()
+        msg = data["choices"][0]["message"]
+    except (httpx.HTTPError, ValueError, KeyError, IndexError) as e:
+        raise LLMError(f"调用大模型失败：{e}") from e
+    usage = data.get("usage") or {}
+    meta = {"model": settings.llm_model, "latency_ms": int((time.time() - t0) * 1000),
+            "prompt_tokens": usage.get("prompt_tokens"), "completion_tokens": usage.get("completion_tokens")}
+    return {"role": "assistant", "content": msg.get("content") or "", "tool_calls": msg.get("tool_calls") or []}, meta
+
+
 def chat_json(system: str, user: str, **kw) -> tuple[dict, dict]:
     content, meta = chat(
         [{"role": "system", "content": system}, {"role": "user", "content": user}],

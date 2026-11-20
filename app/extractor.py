@@ -24,10 +24,7 @@ WEEKDAYS = "一二三四五六日"
 # 1. 大模型抽取
 # ============================================================
 
-MESSAGE_SYSTEM_PROMPT = """你是企业招聘助手的「信息抽取引擎」。HR 会在企业微信群里用口语描述候选人进展，你要把它转换成结构化 JSON。
-当前时间：{now}（星期{weekday}）。
-
-## 字段规范（消息中没提到的字段一律输出 null，禁止猜测）
+FIELD_RULES_TEMPLATE = """## 字段规范（消息中没提到的字段一律输出 null，禁止猜测）
 - name：候选人姓名（注意区分面试官、HR）
 - phone / email：联系方式
 - position：应聘岗位，尽量归一到 {positions}，都不匹配则保留原文
@@ -41,8 +38,19 @@ MESSAGE_SYSTEM_PROMPT = """你是企业招聘助手的「信息抽取引擎」�
   · 候选人拒绝 offer / 放弃 / 失联→已放弃；入职→已入职；其余推进→进行中
 - interviewer：下一轮（或刚结束这一轮）的面试官姓名
 - interview_time：下一次面试时间，换算为绝对时间 "YYYY-MM-DD HH:MM"。只说上午默认 10:00，下午 14:00，晚上 19:00；只有日期默认 10:00
-- feedback：面试评价 / 备注的简短概括（≤40 字）
+- feedback：面试评价 / 备注的简短概括（≤40 字）"""
 
+
+def field_rules() -> str:
+    """字段规范（抽取 Prompt 与智能体 Prompt 共用）。"""
+    return FIELD_RULES_TEMPLATE.format(positions="、".join(POSITIONS), channels="、".join(CHANNELS),
+                                       stages="、".join(STAGES), statuses="、".join(STATUSES))
+
+
+MESSAGE_SYSTEM_PROMPT = """你是企业招聘助手的「信息抽取引擎」。HR 会在企业微信群里用口语描述候选人进展，你要把它转换成结构化 JSON。
+当前时间：{now}（星期{weekday}）。
+
+{field_rules}
 ## 意图 intent
 - update：登记 / 更新候选人信息（一条消息可能包含多个候选人）
 - query：询问统计数据或候选人情况 → 原问题放入 question
@@ -104,8 +112,7 @@ def llm_extract_message(text: str, known: list[dict]) -> dict:
     n = now()
     system = MESSAGE_SYSTEM_PROMPT.format(
         now=n.strftime("%Y-%m-%d %H:%M"), weekday=WEEKDAYS[n.weekday()],
-        positions="、".join(POSITIONS), channels="、".join(CHANNELS),
-        stages="、".join(STAGES), statuses="、".join(STATUSES), known=_known_text(known),
+        field_rules=field_rules(), known=_known_text(known),
     )
     data, meta = llm.chat_json(system, text)
     intent = data.get("intent") if data.get("intent") in ("update", "query", "report", "chat") else "chat"
@@ -157,7 +164,7 @@ def _find_names(text: str, known_names: list[str]) -> list[tuple[int, str]]:
     """返回 [(位置, 姓名)]。先匹配已有候选人，再用「常见姓氏 + 边界」启发式发现新名字。"""
     found: dict[int, str] = {}
     blocked: list[tuple[int, int]] = []
-    for m in re.finditer(r"(面试官|HR|hr|面试人|由)[是为:：]?\s*([一-龥]{2,3})", text):
+    for m in re.finditer(r"(面试官|HR|hr|面试人|由)(?:是|为|换成|改成|改为|换为)?[:：]?\s*([一-龥]{2,3})", text):
         blocked.append((m.start(), m.end()))
 
     def is_blocked(i: int) -> bool:
@@ -257,7 +264,7 @@ def _rules_chunk(chunk: str, name: str) -> dict:
         c["phone"] = m.group(0)
     if m := re.search(r"[\w.+-]+@[\w-]+\.[\w.]+", chunk):
         c["email"] = m.group(0)
-    if m := re.search(r"面试官[是为:：]?\s*([一-龥]{2,3}?)(?=[，,。；;、\s]|$|面|来|负责)", chunk):
+    if m := re.search(r"面试官(?:是|为|换成|改成|改为|换为)?[:：]?\s*([一-龥]{2,3}?)(?=[，,。；;、\s]|$|面|来|负责)", chunk):
         c["interviewer"] = m.group(1)
 
     rounds = [(m.start(), ROUND_TO_STAGE[m.group(0)]) for m in re.finditer(ROUND_RE, low)]

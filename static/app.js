@@ -6,6 +6,9 @@
   const OPERATOR = "HR小王";
   const EXAMPLES = [
     ["新候选人建档", "张三 Java后端 BOSS来的，一面过了，明天下午3点二面，面试官陈晨"],
+    ["多轮·改时间", "把他的二面改到后天上午10点"],
+    ["多轮·换面试官", "他的面试官换成林峰"],
+    ["多轮·追问", "他现在什么情况？"],
     ["一句话更新多人", "王芳二面挂了，算法基础薄弱；赵磊接了offer"],
     ["入职", "孙浩今天入职了"],
     ["带手机号建档", "李雷 前端 内推 13800138000 约了后天上午10点一面 面试官林峰"],
@@ -58,6 +61,7 @@
 
   const shortTime = (s) => (s ? s.slice(5, 16) : "");
   const shortT = (v) => (/^\d{4}-\d{2}-\d{2} /.test(String(v)) ? String(v).slice(5, 16) : v);
+  const TOOL_LABEL = { record_candidates: "记录候选人", search_candidates: "查找候选人", get_candidate: "查看详情", query_data: "统计查询", daily_report: "生成日报" };
   const CARD_FIELDS = { stage: "阶段", status: "状态", position: "岗位", channel: "渠道", interview_time: "面试时间", interviewer: "面试官" };
   const isDark = () => document.documentElement.dataset.theme === "dark" || (document.documentElement.dataset.theme !== "light" && matchMedia("(prefers-color-scheme: dark)").matches);
   const stageColor = (s) => css(`--st${Math.max(0, STAGES.indexOf(s))}`);
@@ -90,6 +94,7 @@
     const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
     const changed = m.items.length !== S.msgs.length || (m.items.at(-1) || {}).id !== (S.msgs.at(-1) || {}).id;
     S.msgs = m.items;
+    box.querySelectorAll(".mini-chart").forEach((el) => echarts?.getInstanceByDom(el)?.dispose()); // 释放旧图表实例
     box.replaceChildren(...S.msgs.map(renderMsg));
     if (changed || atBottom) box.scrollTop = box.scrollHeight;
   }
@@ -133,11 +138,20 @@
         requestAnimationFrame(() => miniBar(el, p.chart));
       }
     }
+    // 智能体推理过程：每一步调用了什么工具、得到什么结果
+    if (p.agent) {
+      const ag = p.agent;
+      const bits = [`${ag.steps.length} 步`, ag.model, ag.latency_ms && `${(ag.latency_ms / 1000).toFixed(1)}s`, ag.tokens && `${ag.tokens} tokens`].filter(Boolean);
+      bubble.append(h("details", { class: "ai" }, h("summary", {}, `🧠 智能体推理 · ${bits.join(" · ")}`),
+        ag.steps.length ? h("ol", { class: "steps" }, ...ag.steps.map((s) => h("li", {},
+          h("b", {}, TOOL_LABEL[s.tool] || s.tool), "　", s.summary,
+          h("code", {}, JSON.stringify(s.args))))) : h("div", {}, "未调用工具（直接回复 / 反问）")));
+    }
     // AI 解析详情：展示大模型 / 规则引擎的结构化输出，体现「AI 做了什么」
     const ex = p.extraction;
     if (ex) {
       const engine = ex.engine === "llm" ? `大模型 ${ex.llm_meta?.model || ""}` : "规则引擎";
-      const bits = [engine, ex.intent && `意图 ${ex.intent}`, ex.confidence != null && `置信度 ${Number(ex.confidence).toFixed(2)}`,
+      const bits = [engine, ex.coreference && `指代 ${ex.coreference}`, ex.intent && `意图 ${ex.intent}`, ex.confidence != null && `置信度 ${Number(ex.confidence).toFixed(2)}`,
         ex.llm_meta?.latency_ms && `${ex.llm_meta.latency_ms}ms`].filter(Boolean);
       const shown = { ...ex };
       if (p.query) shown.query_plan = p.query.plan;
@@ -150,6 +164,7 @@
   function miniBar(el, chart) {
     const c = echarts.init(el, null, { renderer: "svg" });
     c.setOption({
+      animation: false, // 消息列表会随实时推送重绘，避免反复播放动画
       grid: { left: 4, right: 30, top: 6, bottom: 4, containLabel: true },
       tooltip: { trigger: "axis", axisPointer: { type: "shadow" } },
       xAxis: { type: "value", show: false },
