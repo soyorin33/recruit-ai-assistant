@@ -289,8 +289,8 @@ async def stream(request: Request) -> StreamingResponse:
                 idle = 0
             else:
                 idle += 1
-                if idle % 30 == 0:
-                    yield ": ping\n\n"
+                if idle % 30 == 0:  # 每 15 秒一次心跳：前端超过 40 秒没收到任何事件就自动重连
+                    yield f"data: {json.dumps({'id': last, 'kinds': ['ping'], 'progress': []})}\n\n"
             await asyncio.sleep(0.5)
 
     return StreamingResponse(gen(), media_type="text/event-stream",

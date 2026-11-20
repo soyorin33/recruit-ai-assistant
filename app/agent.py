@@ -257,6 +257,8 @@ def focus_text(focus_ids: list[int]) -> str:
 # 回复中出现这些「已完成写入」的说法，但本轮没有成功调用 record_candidates → 判定为模型谎报
 # 只匹配「做了修改」的动作词；「已淘汰 / 已入职」是描述状态，不算
 WRITE_CLAIM_RE = re.compile(r"已(经)?(帮你)?(改|修改|更新|记录|登记|建档|新建|调整|改为|改成|换成|换为|标记|设为|设置|录入|写入|同步)")
+GUARD_QUERY_NOTE = ("【系统校验】这是一个数据查询问题，但你没有调用任何工具就作答了。对话历史里的数据可能已经过时，"
+                    "请先调用 get_candidate / search_candidates / query_data 等工具获取最新数据，再回答。")
 GUARD_NOTE = ("【系统校验】你在回复中表示已经修改了数据，但本轮并没有调用 record_candidates，数据库没有任何变化。"
               "请现在调用 record_candidates 完成修改；如果确实无法修改，请如实告诉 HR，不要声称已完成。")
 
@@ -278,6 +280,8 @@ def run(text: str, operator: str, source: str, history: list[dict], focus_ids: l
                                   field_rules=field_rules(), focus=focus_text(focus_ids))
     messages = [{"role": "system", "content": system}, *history, {"role": "user", "content": text}]
     ctx = Ctx(operator=operator, source=source, raw_text=text)
+    from .extractor import rules_extract_message
+    is_query = rules_extract_message(text, []).get("intent") in ("query", "report")  # 规则判断：是否是在问数据
     t0, tokens, final, guarded = time.time(), 0, "", False
     for _ in range(MAX_STEPS):
         if ctx.steps:
@@ -287,12 +291,18 @@ def run(text: str, operator: str, source: str, history: list[dict], focus_ids: l
         calls = msg.get("tool_calls") or []
         if not calls:
             final = msg.get("content", "").strip()
-            # 本轮一个工具都没调用、却声称做了修改 → 必然是谎报（查询类回答至少会调用一次查询工具）
-            if not ctx.steps and not guarded and WRITE_CLAIM_RE.search(final):
-                # 代码层校验：模型声称改了数据却没有调用写入工具 → 打回重来一次（不依赖模型自觉）
+            # 代码层校验（不依赖模型自觉），本轮一个工具都没调用时：
+            # ① 回复声称「已改 / 已记录」→ 必然是谎报；② 在问数据 → 很可能是照抄历史里的旧数据。都打回重做一次。
+            note = None
+            if not ctx.steps and not guarded:
+                if WRITE_CLAIM_RE.search(final):
+                    note, why = GUARD_NOTE, "模型声称已修改数据但未调用写入工具"
+                elif is_query:
+                    note, why = GUARD_QUERY_NOTE, "模型未查询就回答了数据问题（可能照抄历史旧数据）"
+            if note:
                 guarded = True
-                ctx.steps.append({"tool": "guard", "args": {}, "summary": "⚠️ 拦截：模型声称已修改数据但未调用写入工具，已要求重做"})
-                messages += [{"role": "assistant", "content": final}, {"role": "user", "content": GUARD_NOTE}]
+                ctx.steps.append({"tool": "guard", "args": {}, "summary": f"⚠️ 拦截：{why}，已要求重做"})
+                messages += [{"role": "assistant", "content": final}, {"role": "user", "content": note}]
                 final = ""
                 continue
             break

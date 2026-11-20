@@ -62,7 +62,7 @@
 
   const shortTime = (s) => (s ? s.slice(5, 16) : "");
   const shortT = (v) => (/^\d{4}-\d{2}-\d{2} /.test(String(v)) ? String(v).slice(5, 16) : v);
-  const TOOL_LABEL = { record_candidates: "记录候选人", search_candidates: "查找候选人", get_candidate: "查看详情", query_data: "统计查询", daily_report: "生成日报" };
+  const TOOL_LABEL = { guard: "🛡️ 校验拦截", record_candidates: "记录候选人", search_candidates: "查找候选人", get_candidate: "查看详情", query_data: "统计查询", daily_report: "生成日报" };
   const CARD_FIELDS = { stage: "阶段", status: "状态", position: "岗位", channel: "渠道", interview_time: "面试时间", interviewer: "面试官" };
   const isDark = () => document.documentElement.dataset.theme === "dark" || (document.documentElement.dataset.theme !== "light" && matchMedia("(prefers-color-scheme: dark)").matches);
   const stageColor = (s) => css(`--st${Math.max(0, STAGES.indexOf(s))}`);
@@ -103,6 +103,7 @@
     S.msgs = m.items;
     box.querySelectorAll(".mini-chart").forEach((el) => echarts?.getInstanceByDom(el)?.dispose()); // 释放旧图表实例
     box.replaceChildren(...S.msgs.map(renderMsg));
+    if (S.typing) box.append(typingEl()); // 处理中重绘列表时保留「正在…」提示
     if (changed || atBottom) box.scrollTop = box.scrollHeight;
   }
 
@@ -181,10 +182,16 @@
     });
   }
 
+  function typingEl() {
+    return h("div", { class: "typing", id: "typing" }, S.typingText || "招聘助手正在理解消息…");
+  }
+
   function showTyping(on) {
-    let t = document.getElementById("typing");
+    S.typing = on;
+    if (on) S.typingText = "";
+    const t = document.getElementById("typing");
     if (on && !t) {
-      $("msgs").append(h("div", { class: "typing", id: "typing" }, "招聘助手正在理解消息…"));
+      $("msgs").append(typingEl());
       $("msgs").scrollTop = $("msgs").scrollHeight;
     } else if (!on && t) t.remove();
   }
@@ -477,18 +484,31 @@
   let pendingRefresh = null;
   function connectStream() {
     const es = new EventSource("/api/stream");
+    S.es = es;
+    S.lastBeat = Date.now();
     es.onmessage = (e) => {
       const data = JSON.parse(e.data || "{}");
+      S.lastBeat = Date.now();
       const mine = (data.progress || []).filter((p) => p.operator === OPERATOR).at(-1);
       const typing = document.getElementById("typing");
+      if (mine) S.typingText = mine.text;
       if (mine && typing) typing.textContent = mine.text; // 智能体每一步实时显示
-      if ((data.kinds || []).every((k) => k === "progress")) return; // 纯进度事件无需刷新数据
+      if ((data.kinds || []).every((k) => k === "progress" || k === "ping")) return; // 进度 / 心跳无需刷新数据
       clearTimeout(pendingRefresh);
       pendingRefresh = setTimeout(refreshAll, 150); // 合并短时间内的多次变更
     };
-    es.onopen = () => $("live-dot")?.classList.add("live");
+    es.onopen = () => { S.lastBeat = Date.now(); $("live-dot")?.classList.add("live"); };
     es.onerror = () => $("live-dot")?.classList.remove("live");
   }
+
+  // 看门狗：代理 / 网关可能悄悄掐断长连接，超过 40 秒没收到任何事件（含 15 秒一次的心跳）就重连并补一次刷新
+  setInterval(() => {
+    if (S.es && Date.now() - S.lastBeat > 40000) {
+      S.es.close();
+      connectStream();
+      refreshAll();
+    }
+  }, 10000);
 
   /* ======================= 绑定事件 ======================= */
   function bind() {

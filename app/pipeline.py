@@ -96,8 +96,12 @@ def plan_change(c: dict) -> dict:
         new["status"] = STATUS_ACTIVE
     if "stage" in new and new["stage"] != old_stage and "interview_time" not in new:
         new["interview_time"] = None  # 进入新阶段，旧的面试时间作废
-    if new.get("feedback") and existing.get("feedback") and new["feedback"] not in existing["feedback"]:
-        new["feedback"] = (existing["feedback"] + "；" + new["feedback"])[-150:]
+    if new.get("feedback") and existing.get("feedback"):
+        old_fb, new_fb = existing["feedback"], new["feedback"]
+        if new_fb in old_fb:          # 已经记过，不重复
+            new["feedback"] = old_fb
+        elif not new_fb.startswith(old_fb):  # 新的一条评价 → 追加；若已包含原评价（如确认时重算），保持不变
+            new["feedback"] = (old_fb + "；" + new_fb)[-150:]
 
     # ---- 状态机校验 ----
     if "stage" in new and new["stage"] != old_stage:

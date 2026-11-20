@@ -133,3 +133,11 @@ def test_wecom_crypto_roundtrip():
     assert c.verify_url(sig, "1409659813", "nonce", enc) == xml
     with pytest.raises(WeComCryptoError):
         c.decrypt_xml("bad", "1409659813", "nonce", packed.encode())
+
+
+def test_feedback_not_duplicated_on_confirm():
+    pipeline.handle_message("张三 Java后端 一面过了，基础扎实，明天二面", operator="hr")
+    pipeline.handle_message("张三一面挂了，评价：项目深度不够", operator="hr")  # 阶段回退 → 待确认
+    pipeline.handle_message("确认", operator="hr")
+    fb = db.find_by_name("张三")[0]["feedback"]
+    assert fb.count("基础扎实") == 1 and fb.count("项目深度不够") == 1, fb

@@ -247,3 +247,17 @@ def test_status_description_is_not_a_write_claim(fake):
     fake.script = [tool_call("get_candidate", {"name": "王芳"}), reply("王芳二面已淘汰，评价是算法基础薄弱。")]
     msg = send("王芳怎么样了")
     assert all(s["tool"] != "guard" for s in msg["payload"]["agent"]["steps"]) and len(fake.requests) == 2
+
+
+def test_data_question_answered_from_memory_is_caught(fake):
+    """真实 DeepSeek 试跑中发现：同一个问题第二次问时，模型不调工具、直接照抄历史里的旧答案。"""
+    fake.script = [tool_call("record_candidates", {"updates": [ZHANG], "confidence": 0.95}), reply("已建档。")]
+    send("张三 …")
+
+    def must_get_query_note(body):
+        assert "数据查询问题" in body["messages"][-1]["content"]
+        return tool_call("get_candidate", {"name": "张三"})
+    fake.script = [reply("张三在复试阶段（来自记忆）。"), must_get_query_note, reply("张三：复试·进行中。")]
+    msg = send("张三现在什么情况？")
+    tools = [s["tool"] for s in msg["payload"]["agent"]["steps"]]
+    assert tools == ["guard", "get_candidate"] and msg["text"] == "张三：复试·进行中。"
