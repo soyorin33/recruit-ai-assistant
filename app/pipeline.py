@@ -180,10 +180,7 @@ def conversation(operator: str, limit: int = 12) -> tuple[list[dict], list[int]]
         focus += [i for i in ids if i not in focus]
     history = []
     for m in rows[-limit:]:
-        content = (m["text"] or "")[:300]
-        if m["role"] == "bot" and m["payload"].get("focus"):
-            names = [c["name"] for c in (db.get_candidate(i) for i in m["payload"]["focus"][:3]) if c]
-            content += f"\n（涉及候选人：{'、'.join(f'#{i} {n}' for i, n in zip(m['payload']['focus'], names))}）"
+        content = (m["text"] or "")[:300]  # 「涉及哪些候选人」放在 system 的「最近提及」里，不混入历史，避免模型照抄
         history.append({"role": "user" if m["role"] == "user" else "assistant", "content": content})
     return history, focus[:6]
 
@@ -240,7 +237,10 @@ def handle_message(text: str, operator: str = "HR", source: str = "web", progres
 def _route(text: str, operator: str, source: str, history: list[dict], focus: list[int], notify=None) -> dict:
     bare = re.sub(r"@\S+\s*", "", text).strip().lower().rstrip("。!！")
     from .extractor import CANCEL_WORDS, CONFIRM_WORDS
-    if settings.llm_enabled and bare not in CONFIRM_WORDS | CANCEL_WORDS:
+    is_confirm = bare in CONFIRM_WORDS | CANCEL_WORDS
+    if is_confirm and settings.llm_enabled and not db.latest_open_pending(operator):
+        is_confirm = False  # 没有待确认卡片：这句「确认 / 好的」是在回答智能体的追问，交给智能体结合上下文处理
+    if settings.llm_enabled and not is_confirm:
         from . import agent
         try:
             return agent.run(text, operator, source, history, focus, progress=notify)

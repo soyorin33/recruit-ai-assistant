@@ -108,7 +108,7 @@ def test_multi_turn_pronoun(fake):
         system, history = body["messages"][0]["content"], body["messages"][1:-1]
         assert f"candidate_id={cid}：张三" in system  # 最近提及的候选人进入 Prompt
         assert any("张三 Java后端" in m["content"] for m in history if m["role"] == "user")  # 历史对话
-        assert any(f"#{cid} 张三" in m["content"] for m in history if m["role"] == "assistant")
+        assert not any("涉及候选人" in m["content"] for m in history)  # 内部标注不混入历史，避免模型照抄
         return tool_call("record_candidates", {"updates": [
             {"candidate_id": cid, "name": "张三", "interview_time": "2026-11-27 10:00"}], "confidence": 0.9})
 
@@ -210,3 +210,40 @@ def test_report_tool(fake):
     fake.script = [tool_call("daily_report", {}), reply("日报已生成。")]
     msg = send("发一下今天的日报")
     assert msg["payload"]["kind"] == "report" and "招聘日报" in msg["text"]
+
+
+def test_write_claim_without_tool_is_caught(fake):
+    """真实 DeepSeek 试跑中发现：模型没调用工具却回复「已改为林峰」。代码层校验必须拦下并要求重做。"""
+    fake.script = [tool_call("record_candidates", {"updates": [ZHANG], "confidence": 0.95}), reply("已建档。")]
+    send("张三 …")
+    cid = db.find_by_name("张三")[0]["id"]
+
+    def must_get_guard_note(body):
+        assert "【系统校验】" in body["messages"][-1]["content"]
+        return tool_call("record_candidates", {"updates": [{"candidate_id": cid, "name": "张三", "interviewer": "林峰"}],
+                                               "confidence": 0.95})
+    fake.script = [reply("张三的面试官已改为林峰。"), must_get_guard_note, reply("张三的面试官已改为林峰。")]
+    msg = send("他的面试官换成林峰")
+    assert db.get_candidate(cid)["interviewer"] == "林峰"
+    assert msg["payload"]["agent"]["steps"][0]["tool"] == "guard"
+
+
+def test_honest_reply_without_tool_is_not_blocked(fake):
+    fake.script = [reply("请问是哪个岗位的张伟？")]
+    msg = send("张伟一面过了")
+    assert len(fake.requests) == 1 and msg["payload"]["agent"]["steps"] == []
+
+
+def test_confirm_without_pending_goes_to_agent(fake):
+    """真实试跑中发现：模型用文字追问「确认吗」，HR 回「确认」却被规则快捷路径回了「没有待确认记录」。"""
+    fake.script = [reply("这会把张三改成初试淘汰，确认吗？")]
+    send("张三一面挂了")
+    fake.script = [lambda body: (body["messages"][-1]["content"] == "确认" and reply("好的，已取消这次操作。")) or reply("x")]
+    msg = send("确认")
+    assert "当前没有待确认" not in msg["text"] and len(fake.requests) == 2
+
+
+def test_status_description_is_not_a_write_claim(fake):
+    fake.script = [tool_call("get_candidate", {"name": "王芳"}), reply("王芳二面已淘汰，评价是算法基础薄弱。")]
+    msg = send("王芳怎么样了")
+    assert all(s["tool"] != "guard" for s in msg["payload"]["agent"]["steps"]) and len(fake.requests) == 2

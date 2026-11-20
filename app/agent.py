@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 
@@ -37,6 +38,9 @@ SYSTEM_PROMPT = """你是企业微信里的「招聘助手」智能体，服务�
 - 统计、名单、漏斗、分布类问题调用 query_data；问某个人的情况调用 get_candidate；要日报 / 汇总调用 daily_report。
 - 信息明显缺失（如新候选人没有姓名）或存在歧义（同名多人）时，用一句话反问 HR，不要调用写入工具。
 - 工具返回「待确认」时，告诉 HR 需要回复「确认」或点击卡片确认。
+- 【重要】修改数据只能通过调用 record_candidates 完成。本轮没有成功调用它，就绝不能说「已改 / 已记录 / 已更新」。
+- 【重要】不要自己用文字向 HR 索要「确认」：即使变更有风险（如阶段回退），也直接调用 record_candidates，系统会自动判断是否需要 HR 确认并生成确认卡片。
+- 对话历史只用于理解上下文，其中描述的数据可能已过时，以工具查询结果为准。
 
 {field_rules}
 
@@ -250,6 +254,12 @@ def focus_text(focus_ids: list[int]) -> str:
                      + (f"，面试 {r['interview_time']}" if r.get("interview_time") else "") + "）" for r in rows)
 
 
+# 回复中出现这些「已完成写入」的说法，但本轮没有成功调用 record_candidates → 判定为模型谎报
+# 只匹配「做了修改」的动作词；「已淘汰 / 已入职」是描述状态，不算
+WRITE_CLAIM_RE = re.compile(r"已(经)?(帮你)?(改|修改|更新|记录|登记|建档|新建|调整|改为|改成|换成|换为|标记|设为|设置|录入|写入|同步)")
+GUARD_NOTE = ("【系统校验】你在回复中表示已经修改了数据，但本轮并没有调用 record_candidates，数据库没有任何变化。"
+              "请现在调用 record_candidates 完成修改；如果确实无法修改，请如实告诉 HR，不要声称已完成。")
+
 PROGRESS_TEXT = {"record_candidates": "📝 正在记录候选人…", "search_candidates": "🔍 正在查找候选人…",
                  "get_candidate": "📇 正在查看候选人详情…", "query_data": "📊 正在统计数据…",
                  "daily_report": "📰 正在生成日报…"}
@@ -268,7 +278,7 @@ def run(text: str, operator: str, source: str, history: list[dict], focus_ids: l
                                   field_rules=field_rules(), focus=focus_text(focus_ids))
     messages = [{"role": "system", "content": system}, *history, {"role": "user", "content": text}]
     ctx = Ctx(operator=operator, source=source, raw_text=text)
-    t0, tokens, final = time.time(), 0, ""
+    t0, tokens, final, guarded = time.time(), 0, "", False
     for _ in range(MAX_STEPS):
         if ctx.steps:
             notify("✍️ 正在组织回复…")
@@ -277,6 +287,14 @@ def run(text: str, operator: str, source: str, history: list[dict], focus_ids: l
         calls = msg.get("tool_calls") or []
         if not calls:
             final = msg.get("content", "").strip()
+            # 本轮一个工具都没调用、却声称做了修改 → 必然是谎报（查询类回答至少会调用一次查询工具）
+            if not ctx.steps and not guarded and WRITE_CLAIM_RE.search(final):
+                # 代码层校验：模型声称改了数据却没有调用写入工具 → 打回重来一次（不依赖模型自觉）
+                guarded = True
+                ctx.steps.append({"tool": "guard", "args": {}, "summary": "⚠️ 拦截：模型声称已修改数据但未调用写入工具，已要求重做"})
+                messages += [{"role": "assistant", "content": final}, {"role": "user", "content": GUARD_NOTE}]
+                final = ""
+                continue
             break
         messages.append({"role": "assistant", "content": msg.get("content") or "", "tool_calls": calls})
         for call in calls:
