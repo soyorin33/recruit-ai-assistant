@@ -68,6 +68,15 @@
   const stageColor = (s) => css(`--st${Math.max(0, STAGES.indexOf(s))}`);
 
   /* ======================= 状态栏 ======================= */
+  function tdocsChip(t) {
+    const label = !t.enabled ? "腾讯文档：未配置" : t.last_error ? "腾讯文档：同步异常" : `腾讯文档：已同步 ${t.synced}`;
+    const title = t.last_error || (t.enabled ? "候选人变更实时写入腾讯文档智能表格（官方 MCP），点击打开" : "配置 TDOCS_TOKEN 并运行 scripts.tdocs_setup 后启用");
+    const inner = [h("span", { class: "dot" + (t.enabled && !t.last_error ? " on" : "") }), label];
+    return t.enabled && t.url
+      ? h("a", { class: "chip", title, href: t.url, target: "_blank", rel: "noopener" }, ...inner)
+      : h("span", { class: "chip", title }, ...inner);
+  }
+
   async function loadStatus() {
     S.status = await api("/api/status");
     const st = S.status;
@@ -79,7 +88,11 @@
       chip(st.wecom_app, st.wecom_app ? "企微应用：已接入" : "企微应用：未接入", "接收 HR 在企业微信中发给招聘助手的消息"),
       chip(st.smartsheet.enabled, st.smartsheet.enabled ? `智能表格：已同步 ${st.smartsheet.synced}` : "智能表格：未配置", st.smartsheet.last_error || "候选人变更自动写入企微智能表格"),
       chip(st.webhook, st.webhook ? "群机器人：已接入" : "群机器人：未配置", "日报 / 预警推送到企微群"),
-      chip(st.aibot, st.aibot ? "群 @ 助手：已接入" : "群 @ 助手：未配置", "企微智能机器人：在群里 @招聘助手 即可记录 / 查询"),
+      tdocsChip(st.tdocs),
+      st.aibot_ws.enabled
+        ? chip(st.aibot_ws.state === "已连接", `群 @ 助手：${st.aibot_ws.state}`,
+          st.aibot_ws.last_error || `企微智能机器人长连接，已收到 ${st.aibot_ws.received} 条消息；在群里 @招聘助手 即可记录 / 查询`)
+        : chip(st.aibot, st.aibot ? "群 @ 助手：已接入" : "群 @ 助手：未配置", "企微智能机器人：在群里 @招聘助手 即可记录 / 查询"),
       chip(st.vision.enabled, st.vision.enabled ? `截图识别：${st.vision.model}` : "截图识别：未配置", "配置 VISION_MODEL 后可识别简历截图、聊天截图"),
       chip(st.auth_enabled, st.auth_enabled ? "访问：已加口令" : "访问：未加口令（仅限本机）",
         st.auth_enabled ? "看板与接口需要登录" : "部署到公网前请设置 ACCESS_TOKEN"),

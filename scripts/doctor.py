@@ -4,6 +4,7 @@
     python -m scripts.doctor                  # 只读检查，不会发消息、不会写表格
     python -m scripts.doctor --to zhangsan    # 额外给企微成员 zhangsan 发一条测试应用消息
     python -m scripts.doctor --push           # 额外往群机器人推送一条测试消息
+    python -m scripts.doctor --aibot          # 额外实际连接一次智能机器人长连接
 """
 from __future__ import annotations
 
@@ -103,6 +104,42 @@ def check_smartsheet() -> None:
         report("智能表格", FAIL, hint(e))
 
 
+def check_aibot_ws(probe: bool) -> None:
+    if not settings.aibot_ws_enabled:
+        return report("群 @ 助手（智能机器人长连接）", SKIP, "未配置 WECOM_AIBOT_ID / WECOM_AIBOT_SECRET")
+    if not probe:
+        return report("群 @ 助手（智能机器人长连接）", SKIP,
+                      "已配置。加 --aibot 才会实际连接测试（会把正在运行的服务的长连接挤掉，服务 5 分钟后自动重连）")
+    from app.wecom.aibot_ws import probe as do_probe
+    try:
+        ok, detail = do_probe(settings.wecom_aibot_id, settings.wecom_aibot_secret, settings.wecom_aibot_ws_url)
+        report("群 @ 助手（智能机器人长连接）", OK if ok else FAIL,
+               "认证成功" if ok else f"{detail}\n     👉 核对机器人的 Bot ID / Secret，并确认接入方式选的是「长连接」")
+    except Exception as e:
+        report("群 @ 助手（智能机器人长连接）", FAIL, f"连接 {settings.wecom_aibot_ws_url} 失败：{e}"[:200])
+
+
+def check_tdocs() -> None:
+    if not settings.tdocs_token:
+        return report("腾讯文档 MCP", SKIP, "未配置 TDOCS_TOKEN")
+    from app.tdocs import COLUMNS, MCPClient, TDocsError
+    c = MCPClient(settings.tdocs_mcp_url, settings.tdocs_token)
+    try:
+        tools = c.list_tools()
+        report("腾讯文档 MCP 连接", OK, f"{len(tools)} 个工具，含智能表格工具 "
+               f"{sum('smartsheet' in t for t in tools)} 个")
+        if not (settings.tdocs_file_id and settings.tdocs_sheet_id):
+            return report("腾讯文档 候选人总表", SKIP, "还没建表：运行 python -m scripts.tdocs_setup")
+        fields = c.call("smartsheet.list_fields", {"file_id": settings.tdocs_file_id,
+                                                   "sheet_id": settings.tdocs_sheet_id}).get("fields") or []
+        missing = [t for _, t, _ in COLUMNS if t not in {f.get("field_title") for f in fields}]
+        report("腾讯文档 候选人总表", FAIL if missing else OK,
+               f"缺少列：{'、'.join(missing)}（再运行一次 scripts.tdocs_setup 可补齐）" if missing
+               else f"{len(fields)} 列齐全 {settings.tdocs_url or ''}")
+    except TDocsError as e:
+        report("腾讯文档 MCP", FAIL, str(e)[:300])
+
+
 def check_webhook(push: bool) -> None:
     if not settings.webhook_enabled:
         return report("群机器人 Webhook", SKIP, "未配置 WECOM_WEBHOOK_URL")
@@ -120,12 +157,15 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--to", help="企微成员 UserID，发送一条测试应用消息")
     ap.add_argument("--push", action="store_true", help="往群机器人推送一条测试消息")
+    ap.add_argument("--aibot", action="store_true", help="实际连接一次智能机器人长连接（会挤掉运行中服务的连接）")
     args = ap.parse_args()
     print("== 招聘助手 · 接入自检 ==\n")
     check_llm()
     check_wecom(args.to)
     check_callback()
     check_smartsheet()
+    check_tdocs()
+    check_aibot_ws(args.aibot)
     check_webhook(args.push)
     fails = [r for r in results if r[1] == FAIL]
     print(f"\n共 {len(results)} 项：{sum(r[1] == OK for r in results)} 通过，{len(fails)} 失败，"

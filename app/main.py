@@ -32,6 +32,8 @@ async def lifespan(_app: FastAPI):
     task = await _startup()
     yield
     task.cancel()
+    from .wecom import aibot_ws
+    aibot_ws.stop()
 
 
 async def _startup() -> asyncio.Task:
@@ -41,10 +43,14 @@ async def _startup() -> asyncio.Task:
     if not db.one("SELECT id FROM messages LIMIT 1"):  # 正式环境首次启动也给出使用说明
         db.add_message("bot", pipeline.HELP_TEXT, operator="招聘助手", payload={"kind": "chat"})
     sync.start()
+    from .wecom import aibot_ws
+    aibot_ws.start()  # 智能机器人长连接（配置了 WECOM_AIBOT_ID / SECRET 时）
     task = asyncio.create_task(_scheduler())
-    log.info("LLM：%s｜企微应用：%s｜智能表格：%s｜群机器人：%s",
+    log.info("LLM：%s｜企微应用：%s｜智能表格：%s｜腾讯文档：%s｜群机器人：%s｜群 @ 助手：%s",
              settings.llm_model if settings.llm_enabled else "未配置（规则引擎模式）",
-             settings.wecom_app_enabled, settings.smartsheet_enabled, settings.webhook_enabled)
+             settings.wecom_app_enabled, settings.smartsheet_enabled, settings.tdocs_enabled,
+             settings.webhook_enabled, "长连接" if settings.aibot_ws_enabled else
+             ("URL 回调" if settings.aibot_enabled else "未配置"))
     return task
 
 
@@ -146,6 +152,11 @@ def healthz() -> dict:
     return {"ok": True}
 
 
+def _aibot_ws_status() -> dict:
+    from .wecom import aibot_ws
+    return {k: aibot_ws.status[k] for k in ("enabled", "state", "connected_at", "last_error", "received")}
+
+
 @app.get("/api/status")
 def status() -> dict:
     return {
@@ -154,7 +165,9 @@ def status() -> dict:
         "wecom_app": settings.wecom_app_enabled,
         "smartsheet": {**sync.status, "enabled": settings.smartsheet_enabled},
         "webhook": settings.webhook_enabled,
-        "aibot": settings.aibot_enabled,
+        "aibot": settings.aibot_enabled or settings.aibot_ws_enabled,
+        "aibot_ws": _aibot_ws_status(),
+        "tdocs": {**sync.statuses["tdocs"], "enabled": settings.tdocs_enabled, "url": settings.tdocs_url or None},
         "vision": {"enabled": settings.vision_enabled, "model": settings.vision_model or None},
         "confidence_threshold": settings.confidence_threshold,
         "stale_days": settings.stale_days,
@@ -269,6 +282,7 @@ def reset() -> dict:
         raise HTTPException(403, "正式环境不允许重置数据（SEED_DEMO_DATA=0）")
     db.reset()
     seed(db, pipeline.HELP_TEXT)
+    sync.after_reset()  # 腾讯文档：清空旧记录后重新全量写入
     bus.publish("reset", {})
     return {"ok": True}
 

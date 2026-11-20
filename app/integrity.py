@@ -21,7 +21,8 @@ def check(db: DB) -> dict[str, list]:
             "SELECT phone FROM candidates WHERE phone IS NOT NULL AND phone<>'' GROUP BY phone HAVING COUNT(*)>1")],
         "孤儿事件": [r["id"] for r in db.q("SELECT id FROM events WHERE candidate_id NOT IN (SELECT id FROM candidates)")],
         "孤儿同步映射": [r["candidate_id"] for r in db.q(
-            "SELECT candidate_id FROM sync_map WHERE candidate_id NOT IN (SELECT id FROM candidates)")],
+            "SELECT candidate_id FROM sync_map WHERE candidate_id NOT IN (SELECT id FROM candidates) UNION ALL "
+            "SELECT candidate_id FROM tdocs_map WHERE candidate_id NOT IN (SELECT id FROM candidates)")],
         "缺少建档事件": [], "事件时间早于建档": [], "事件时间晚于最后更新": [], "流水回放与当前状态不一致": [],
     }
     for c in cands:
@@ -50,6 +51,6 @@ def summary(db: DB) -> dict:
         "sqlite_integrity": list(integrity.values())[0] if integrity else None,
         "journal_mode": list(db.one("PRAGMA journal_mode").values())[0],
         "tables": {t: db.one(f"SELECT COUNT(*) n FROM {t}")["n"]
-                   for t in ("candidates", "events", "pending", "messages", "sync_map")},
+                   for t in ("candidates", "events", "pending", "messages", "sync_map", "tdocs_map")},
         "indexes": sorted(r["name"] for r in db.q("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_%'")),
     }

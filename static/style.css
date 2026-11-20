@@ -261,3 +261,5 @@ tr.flash { animation: flash 3s ease-out; }
   .toolbar input { width: 100%; }
   .chips { order: 3; flex-basis: 100%; }
 }
+a.chip { text-decoration: none; }
+a.chip:hover { border-color: var(--text-3); color: var(--text); }

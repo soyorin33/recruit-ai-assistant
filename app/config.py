@@ -46,6 +46,10 @@ class Settings:
     # ---- 企微「智能机器人」API 模式（群里 @ 机器人）----
     wecom_aibot_token = _env("WECOM_AIBOT_TOKEN")
     wecom_aibot_aes_key = _env("WECOM_AIBOT_AES_KEY")
+    # 长连接模式（推荐）：只需 Bot ID + Secret，不需要公网域名 / HTTPS / 备案
+    wecom_aibot_id = _env("WECOM_AIBOT_ID")
+    wecom_aibot_secret = _env("WECOM_AIBOT_SECRET")
+    wecom_aibot_ws_url = _env("WECOM_AIBOT_WS_URL", "wss://openws.work.weixin.qq.com")
 
     # ---- 企微群机器人 Webhook（推送日报 / 预警）----
     wecom_webhook_url = _env("WECOM_WEBHOOK_URL")
@@ -53,6 +57,13 @@ class Settings:
     # ---- 企微 / 腾讯文档 智能表格 ----
     smartsheet_docid = _env("SMARTSHEET_DOCID")
     smartsheet_sheet_id = _env("SMARTSHEET_SHEET_ID")
+
+    # ---- 腾讯文档（docs.qq.com）官方 MCP：候选人总表实时写入腾讯文档智能表格 ----
+    tdocs_token = _env("TDOCS_TOKEN")  # 在 https://docs.qq.com/open/auth/mcp.html 生成的个人 Token
+    tdocs_mcp_url = _env("TDOCS_MCP_URL", "https://docs.qq.com/openapi/mcp")
+    tdocs_file_id = _env("TDOCS_FILE_ID")  # 由 python -m scripts.tdocs_setup 自动创建并写入 .env
+    tdocs_sheet_id = _env("TDOCS_SHEET_ID")
+    tdocs_url = _env("TDOCS_URL")
 
     # ---- 业务参数 ----
     db_path = _env("DB_PATH", str(BASE_DIR / "data" / "recruit.db"))
@@ -94,6 +105,14 @@ class Settings:
     @property
     def aibot_enabled(self) -> bool:
         return bool(self.wecom_aibot_token and self.wecom_aibot_aes_key)
+
+    @property
+    def aibot_ws_enabled(self) -> bool:
+        return bool(self.wecom_aibot_id and self.wecom_aibot_secret)
+
+    @property
+    def tdocs_enabled(self) -> bool:
+        return bool(self.tdocs_token and self.tdocs_file_id and self.tdocs_sheet_id)
 
     @property
     def smartsheet_enabled(self) -> bool:

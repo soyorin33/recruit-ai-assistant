@@ -5,4 +5,5 @@ cryptography>=42
 pypdf>=4
 python-multipart>=0.0.9
 python-dotenv>=1.0
+websockets>=12
 pytest>=8

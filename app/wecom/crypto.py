@@ -22,6 +22,31 @@ class WeComCryptoError(Exception):
     pass
 
 
+def media_key(aeskey_b64: str) -> bytes:
+    """长连接模式下每个图片 / 文件链接自带的 aeskey（Base64）→ 32 字节密钥。"""
+    key = base64.b64decode(aeskey_b64 + "=" * (-len(aeskey_b64) % 4))
+    if len(key) != 32:
+        raise WeComCryptoError("aeskey 长度不正确")
+    return key
+
+
+def decrypt_media(data: bytes, key: bytes) -> bytes:
+    """智能机器人图片 / 文件解密：AES-256-CBC，IV 取密钥前 16 字节，PKCS#7 填充至 32 字节倍数。"""
+    dec = Cipher(algorithms.AES(key), modes.CBC(key[:16])).decryptor()
+    raw = dec.update(data) + dec.finalize()
+    pad = raw[-1] if raw else 0
+    if not 1 <= pad <= BLOCK or raw[-pad:] != bytes([pad]) * pad:
+        raise WeComCryptoError("文件解密填充错误")
+    return raw[:-pad]
+
+
+def encrypt_media(data: bytes, key: bytes) -> bytes:
+    """decrypt_media 的逆过程（测试用）。"""
+    pad = BLOCK - len(data) % BLOCK
+    enc = Cipher(algorithms.AES(key), modes.CBC(key[:16])).encryptor()
+    return enc.update(data + bytes([pad]) * pad) + enc.finalize()
+
+
 class WXBizMsgCrypt:
     def __init__(self, token: str, encoding_aes_key: str, receive_id: str):
         self.token = token
@@ -64,19 +89,12 @@ class WXBizMsgCrypt:
         return msg.decode()
 
     def decrypt_bytes(self, data: bytes) -> bytes:
-        """解密智能机器人推送的图片 / 文件：AES-256-CBC，IV 取密钥前 16 字节，PKCS#7 填充至 32 字节倍数。"""
-        dec = Cipher(algorithms.AES(self.key), modes.CBC(self.iv)).decryptor()
-        raw = dec.update(data) + dec.finalize()
-        pad = raw[-1]
-        if not 1 <= pad <= BLOCK or raw[-pad:] != bytes([pad]) * pad:
-            raise WeComCryptoError("文件解密填充错误")
-        return raw[:-pad]
+        """解密智能机器人推送的图片 / 文件（URL 回调模式：密钥即 EncodingAESKey）。"""
+        return decrypt_media(data, self.key)
 
     def encrypt_bytes(self, data: bytes) -> bytes:
         """decrypt_bytes 的逆过程（用于测试模拟企微推送的加密文件）。"""
-        pad = BLOCK - len(data) % BLOCK
-        enc = Cipher(algorithms.AES(self.key), modes.CBC(self.iv)).encryptor()
-        return enc.update(data + bytes([pad]) * pad) + enc.finalize()
+        return encrypt_media(data, self.key)
 
     # ---------- 智能机器人（JSON 协议） ----------
     def decrypt_json(self, msg_signature: str, timestamp: str, nonce: str, body: dict) -> dict:

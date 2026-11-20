@@ -1,0 +1,31 @@
+# 线上部署：应用 + Caddy（HTTPS）。在服务器的项目根目录执行：
+#   DOMAIN=你的域名 docker compose -f deploy/docker-compose.prod.yml up -d --build
+services:
+  recruit-ai:
+    build: ..
+    image: recruit-ai:latest
+    env_file:
+      - path: ../.env            # 大模型等配置（由部署脚本从本机复制）
+        required: false
+      - path: server.env         # 仅服务器保存：访问口令等，重新部署不会覆盖
+        required: false
+    volumes:
+      - ../data:/app/data
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - DOMAIN=${DOMAIN:?请设置 DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    depends_on:
+      - recruit-ai
+    restart: unless-stopped
+
+volumes:
+  caddy_data:

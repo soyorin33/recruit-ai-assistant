@@ -60,6 +60,10 @@ CREATE TABLE IF NOT EXISTS sync_map (
     candidate_id INTEGER PRIMARY KEY,
     record_id TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS tdocs_map (
+    candidate_id INTEGER PRIMARY KEY,
+    record_id TEXT NOT NULL
+);
 """
 
 TS_FMT = "%Y-%m-%d %H:%M:%S"
@@ -107,7 +111,7 @@ class DB:
 
     def reset(self) -> None:
         with self.lock:
-            for t in ("candidates", "events", "pending", "messages", "sync_map"):
+            for t in ("candidates", "events", "pending", "messages", "sync_map", "tdocs_map"):
                 self.conn.execute(f"DELETE FROM {t}")
             self.conn.execute("DELETE FROM sqlite_sequence")
             self.conn.commit()
@@ -198,12 +202,19 @@ class DB:
         return list(reversed(rows))
 
     # ---------- 智能表格映射 ----------
-    def get_record_id(self, cid: int) -> str | None:
-        row = self.one("SELECT record_id FROM sync_map WHERE candidate_id=?", (cid,))
+    # 同步映射：候选人 → 外部表格的行 ID（target: wecom=企微智能表格，tdocs=腾讯文档智能表格）
+    MAP_TABLES = {"wecom": "sync_map", "tdocs": "tdocs_map"}
+
+    def get_record_id(self, cid: int, target: str = "wecom") -> str | None:
+        row = self.one(f"SELECT record_id FROM {self.MAP_TABLES[target]} WHERE candidate_id=?", (cid,))
         return row["record_id"] if row else None
 
-    def set_record_id(self, cid: int, record_id: str) -> None:
-        self.exec("INSERT OR REPLACE INTO sync_map (candidate_id, record_id) VALUES (?,?)", (cid, record_id))
+    def set_record_id(self, cid: int, record_id: str, target: str = "wecom") -> None:
+        self.exec(f"INSERT OR REPLACE INTO {self.MAP_TABLES[target]} (candidate_id, record_id) VALUES (?,?)",
+                  (cid, record_id))
+
+    def clear_record_ids(self, target: str) -> None:
+        self.exec(f"DELETE FROM {self.MAP_TABLES[target]}")
 
 
 db = DB(settings.db_path)

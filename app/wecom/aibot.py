@@ -80,32 +80,53 @@ def stream_reply(sid: str, nonce: str) -> dict:
         "id": sid, "finish": st["finish"], "content": st["content"][:20000]}}, nonce)
 
 
-def _download(url: str) -> bytes:
-    r = httpx.get(url, timeout=30)
+def _download(item: dict) -> bytes:
+    r = httpx.get(item["url"], timeout=30)
     r.raise_for_status()
     return crypt().decrypt_bytes(r.content)
 
 
-def _process(sid: str, data: dict) -> None:
-    """后台执行：调用与网页 / 自建应用完全相同的流水线，把进度与结果写入流。"""
+def run(data: dict, progress, download) -> str:
+    """与传输方式无关的消息处理（URL 回调、长连接共用）：走与网页 / 自建应用完全相同的流水线。
+
+    download(item) 负责下载并解密 data["image"] / data["file"]，返回明文字节。
+    """
     user = (data.get("from") or {}).get("userid") or "group-user"
-    progress = lambda t: store.update(sid, t)  # noqa: E731
-    try:
-        mtype = data.get("msgtype")
-        if mtype == "image":
-            msg = pipeline.handle_image("群聊图片.png", _download(data["image"]["url"]), operator=user,
-                                        source="wecom_group", progress=progress)
-        elif mtype == "file":
-            content = _download(data["file"]["url"])
-            from ..vision import sniff_mime
-            if sniff_mime(content):
-                msg = pipeline.handle_image("群聊图片.png", content, operator=user, source="wecom_group")
-            else:
-                name = "简历.pdf" if content.startswith(b"%PDF") else "简历.txt"
-                msg = pipeline.handle_resume(name, content, operator=user, source="wecom_group")
+    mtype = data.get("msgtype")
+    if mtype == "image":
+        msg = pipeline.handle_image("群聊图片.png", download(data["image"]), operator=user,
+                                    source="wecom_group", progress=progress)
+    elif mtype == "file":
+        content = download(data["file"])
+        from ..vision import sniff_mime
+        if sniff_mime(content):
+            msg = pipeline.handle_image("群聊图片.png", content, operator=user, source="wecom_group")
         else:
-            msg = pipeline.handle_message(extract_text(data), operator=user, source="wecom_group", progress=progress)
-        store.update(sid, msg["text"], finish=True)
+            name = "简历.pdf" if content.startswith(b"%PDF") else "简历.txt"
+            msg = pipeline.handle_resume(name, content, operator=user, source="wecom_group")
+    else:
+        msg = pipeline.handle_message(extract_text(data), operator=user, source="wecom_group", progress=progress)
+    return msg["text"]
+
+
+def prepare(data: dict) -> tuple[str, dict]:
+    """归一化一条消息，返回 (kind, data)：kind 为 process（需处理）/ help（空消息回帮助）/ ignore。"""
+    mtype = data.get("msgtype")
+    if mtype == "mixed" and not extract_text(data):  # 只有图片的图文混排 → 按图片处理
+        imgs = [i for i in data.get("mixed", {}).get("msg_item", []) if i.get("msgtype") == "image"]
+        if imgs:
+            data, mtype = {**data, "msgtype": "image", "image": imgs[0]["image"]}, "image"
+    if mtype not in ("text", "voice", "mixed", "image", "file"):
+        return "ignore", data
+    if mtype in ("text", "voice", "mixed") and not extract_text(data):
+        return "help", data
+    return "process", data
+
+
+def _process(sid: str, data: dict) -> None:
+    """后台执行，把进度与结果写入流（URL 回调模式下企微会反复来取）。"""
+    try:
+        store.update(sid, run(data, lambda t: store.update(sid, t), _download), finish=True)
     except Exception as e:
         log.exception("智能机器人消息处理失败")
         store.update(sid, f"处理失败：{e}", finish=True)
@@ -127,20 +148,15 @@ def extract_text(data: dict) -> str:
 
 def handle(data: dict, nonce: str) -> dict | None:
     """处理一次解密后的回调，返回加密后的被动回复（None 表示回复空包）。"""
-    mtype = data.get("msgtype")
-    if mtype == "stream":  # 流式刷新：返回最新进度 / 最终结果
+    if data.get("msgtype") == "stream":  # 流式刷新：返回最新进度 / 最终结果
         return stream_reply(data.get("stream", {}).get("id", ""), nonce)
     msgid = data.get("msgid") or uuid.uuid4().hex
     if sid := store.sid_for(msgid):  # 重复回调：返回同一条流，不重复处理
         return stream_reply(sid, nonce)
-    if mtype == "mixed" and not extract_text(data):  # 只有图片的图文混排 → 按图片处理
-        imgs = [i for i in data.get("mixed", {}).get("msg_item", []) if i.get("msgtype") == "image"]
-        if imgs:
-            data = {**data, "msgtype": "image", "image": imgs[0]["image"]}
-            mtype = "image"
-    if mtype not in ("text", "voice", "mixed", "image", "file"):
+    kind, data = prepare(data)
+    if kind == "ignore":
         return None
-    if mtype in ("text", "voice", "mixed") and not extract_text(data):
+    if kind == "help":
         sid = store.create(msgid, pipeline.HELP_TEXT)
         store.update(sid, pipeline.HELP_TEXT, finish=True)
         return stream_reply(sid, nonce)
