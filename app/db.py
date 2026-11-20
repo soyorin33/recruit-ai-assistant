@@ -37,6 +37,10 @@ CREATE TABLE IF NOT EXISTS events (
     raw_text TEXT, engine TEXT, source TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
+CREATE INDEX IF NOT EXISTS idx_events_candidate ON events(candidate_id, ts);
+CREATE INDEX IF NOT EXISTS idx_candidates_name ON candidates(name);
+CREATE INDEX IF NOT EXISTS idx_candidates_phone ON candidates(phone);
+CREATE INDEX IF NOT EXISTS idx_candidates_updated ON candidates(updated_at);
 CREATE TABLE IF NOT EXISTS pending (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     created_at TEXT NOT NULL,
@@ -71,6 +75,9 @@ class DB:
         self.conn.row_factory = sqlite3.Row
         self.lock = threading.RLock()
         with self.lock:
+            # WAL：看板读取与消息写入互不阻塞；busy_timeout：自检 / 评测脚本并发访问时等待而不是报错
+            self.conn.execute("PRAGMA journal_mode=WAL")
+            self.conn.execute("PRAGMA busy_timeout=5000")
             self.conn.executescript(SCHEMA)
             self.conn.commit()
 

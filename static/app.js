@@ -47,6 +47,7 @@
       ...opts,
       body: opts.body && !(opts.body instanceof FormData) ? JSON.stringify(opts.body) : opts.body,
     });
+    if (res.status === 401) { location.href = "/login"; throw new Error("未登录"); }
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || res.statusText);
     return res.json();
   }
@@ -78,7 +79,11 @@
       chip(st.wecom_app, st.wecom_app ? "企微应用：已接入" : "企微应用：未接入", "接收 HR 在企业微信中发给招聘助手的消息"),
       chip(st.smartsheet.enabled, st.smartsheet.enabled ? `智能表格：已同步 ${st.smartsheet.synced}` : "智能表格：未配置", st.smartsheet.last_error || "候选人变更自动写入企微智能表格"),
       chip(st.webhook, st.webhook ? "群机器人：已接入" : "群机器人：未配置", "日报 / 预警推送到企微群"),
+      chip(st.auth_enabled, st.auth_enabled ? "访问：已加口令" : "访问：未加口令（仅限本机）",
+        st.auth_enabled ? "看板与接口需要登录" : "部署到公网前请设置 ACCESS_TOKEN"),
     );
+    $("btn-reset").classList.toggle("hidden", !st.demo_mode);
+    $("btn-logout").classList.toggle("hidden", !st.auth_enabled);
   }
 
   /* ======================= 聊天 ======================= */
@@ -474,6 +479,10 @@
       S.prevUpdated = null; S.msgs = [];
       await refreshAll();
       toast("已重置演示数据");
+    };
+    $("btn-logout").onclick = async () => {
+      await fetch("/api/logout", { method: "POST" });
+      location.href = "/login";
     };
     $("btn-push-alerts").onclick = async () => {
       const r = await api("/api/alerts/push", { method: "POST" }).catch((e) => toast(e.message));

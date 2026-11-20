@@ -30,6 +30,15 @@ def _work_time(rng: random.Random, d: datetime) -> datetime:
     return d.replace(hour=rng.randint(9, 18), minute=rng.choice([0, 10, 20, 30, 40, 50]), second=0)
 
 
+def _after(rng: random.Random, t: datetime, lo: float, hi: float) -> datetime:
+    """t 之后 lo~hi 天的某个工作时间点，保证严格晚于 t（_work_time 会重设钟点，同一天时可能倒挂）。"""
+    for _ in range(10):
+        nt = _work_time(rng, t + timedelta(days=rng.uniform(lo, hi)))
+        if nt >= t + timedelta(minutes=30):
+            return nt
+    return t + timedelta(hours=1)
+
+
 def _add(db: DB, rng: random.Random, n: datetime, name: str, position: str, channel: str, created: datetime,
          final_idx: int, outcome: str, schedule: str | None = None) -> None:
     hr = rng.choice(HRS)
@@ -42,7 +51,7 @@ def _add(db: DB, rng: random.Random, n: datetime, name: str, position: str, chan
     t = created
     interviewer = rng.choice(INTERVIEWERS[position])
     for i in range(1, final_idx + 1):
-        nt = _work_time(rng, t + timedelta(days=rng.uniform(0.6, 2.6)))
+        nt = _after(rng, t, 0.6, 2.6)
         if nt >= n - timedelta(hours=1):
             break
         t, prev, stage = nt, stage, STAGES[i]
@@ -64,7 +73,7 @@ def _add(db: DB, rng: random.Random, n: datetime, name: str, position: str, chan
         db.add_event(cid, "update", ch, operator=hr, raw_text=raw, engine="llm", source="wecom", at=t)
 
     if outcome in ("已淘汰", "已放弃") and stage != "已入职":
-        nt = _work_time(rng, t + timedelta(days=rng.uniform(0.3, 1.5)))
+        nt = _after(rng, t, 0.3, 1.5)
         if nt < n - timedelta(hours=1):
             fb = rng.choice(FAIL_FB) if outcome == "已淘汰" else "候选人选择了其他机会"
             word = ROUND_WORD.get(stage, "简历")

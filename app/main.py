@@ -10,11 +10,11 @@ from collections import deque
 from contextlib import asynccontextmanager
 
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, PlainTextResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import analytics, bus, pipeline, report, sync
+from . import analytics, auth, bus, pipeline, report, sync
 from .config import BASE_DIR, now, settings
 from .db import db
 from .domain import FIELD_LABELS
@@ -38,6 +38,8 @@ async def _startup() -> asyncio.Task:
     if settings.seed_demo_data and not db.one("SELECT id FROM candidates LIMIT 1"):
         seed(db, pipeline.HELP_TEXT)
         log.info("已生成演示数据")
+    if not db.one("SELECT id FROM messages LIMIT 1"):  # 正式环境首次启动也给出使用说明
+        db.add_message("bot", pipeline.HELP_TEXT, operator="招聘助手", payload={"kind": "chat"})
     sync.start()
     task = asyncio.create_task(_scheduler())
     log.info("LLM：%s｜企微应用：%s｜智能表格：%s｜群机器人：%s",
@@ -74,6 +76,54 @@ app = FastAPI(title="招聘助手 · AI 招聘数据自动化", version="1.0.0",
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 
+@app.middleware("http")
+async def access_control(request: Request, call_next):
+    """设置了 ACCESS_TOKEN 时，除登录页、健康检查、企微回调和静态资源外，全部需要登录。"""
+    path = request.url.path
+    if settings.auth_enabled and not auth.is_public(path) and not auth.is_authed(request):
+        if path.startswith("/api/"):
+            return JSONResponse({"detail": "未登录或登录已过期"}, status_code=401)
+        return RedirectResponse("/login")
+    return await call_next(request)
+
+
+# ======================= 登录 =======================
+class LoginIn(BaseModel):
+    token: str
+
+
+@app.get("/login")
+def login_page() -> Response:
+    if not settings.auth_enabled:
+        return RedirectResponse("/")
+    return FileResponse(STATIC / "login.html")
+
+
+@app.post("/api/login")
+def login(body: LoginIn, request: Request) -> Response:
+    if not settings.auth_enabled:
+        return JSONResponse({"ok": True})
+    ip = auth.client_ip(request)
+    if auth.too_many_fails(ip):
+        return JSONResponse({"detail": "尝试次数过多，请 10 分钟后再试"}, status_code=429)
+    if not auth.check_token(body.token.strip()):
+        auth.record_fail(ip)
+        return JSONResponse({"detail": "口令不正确"}, status_code=401)
+    auth.reset_fails(ip)
+    resp = JSONResponse({"ok": True})
+    https = request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"
+    resp.set_cookie(auth.COOKIE, auth.make_session(), max_age=settings.session_hours * 3600,
+                    httponly=True, samesite="lax", secure=https)
+    return resp
+
+
+@app.post("/api/logout")
+def logout() -> Response:
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie(auth.COOKIE)
+    return resp
+
+
 # ======================= Web 演示台 API =======================
 class MessageIn(BaseModel):
     text: str
@@ -106,6 +156,8 @@ def status() -> dict:
         "webhook": settings.webhook_enabled,
         "confidence_threshold": settings.confidence_threshold,
         "stale_days": settings.stale_days,
+        "auth_enabled": settings.auth_enabled,
+        "demo_mode": settings.demo_mode,
         "report_time": settings.report_time,
         "now": now().strftime("%Y-%m-%d %H:%M"),
     }
@@ -202,6 +254,8 @@ def export_csv() -> Response:
 
 @app.post("/api/reset")
 def reset() -> dict:
+    if not settings.demo_mode:
+        raise HTTPException(403, "正式环境不允许重置数据（SEED_DEMO_DATA=0）")
     db.reset()
     seed(db, pipeline.HELP_TEXT)
     bus.publish("reset", {})

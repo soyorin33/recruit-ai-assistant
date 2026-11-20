@@ -54,6 +54,20 @@ class Settings:
     alert_time = _env("ALERT_TIME", "10:00")  # 每日超时预警推送时间
     seed_demo_data = _env("SEED_DEMO_DATA", "1") == "1"
 
+    # ---- 访问控制 ----
+    # 设置后，看板与所有 /api 接口都需要先输入口令（部署到公网时必须设置）
+    access_token = _env("ACCESS_TOKEN")
+    session_hours = int(_env("SESSION_HOURS", "72"))
+
+    @property
+    def demo_mode(self) -> bool:
+        """演示模式：允许「重置演示数据」。正式使用（SEED_DEMO_DATA=0）时关闭。"""
+        return self.seed_demo_data
+
+    @property
+    def auth_enabled(self) -> bool:
+        return bool(self.access_token)
+
     @property
     def llm_enabled(self) -> bool:
         return bool(self.llm_api_key)

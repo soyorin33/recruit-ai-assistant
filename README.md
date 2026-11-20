@@ -33,9 +33,10 @@ uvicorn app.main:app --port 8000
 其他常用命令：
 
 ```bash
-python -m pytest -q                   # 31 项测试，含智能体与企微的端到端模拟
+python -m pytest -q                   # 74 项测试，含智能体、企微端到端、访问控制、数据一致性
 python -m eval.run_eval --engine both # 抽取准确率评测：规则引擎 vs 大模型
 python -m scripts.doctor              # 接入自检：逐项检查模型 / 企微 / 表格 / 群机器人
+python -m scripts.check_db            # 数据库一致性检查：枚举、时间顺序、重复、流水回放
 ```
 
 ## 二、演示脚本（建议按顺序点左下角的示例）
@@ -104,6 +105,8 @@ flowchart TB
 6. **模型无关**：使用 OpenAI 兼容协议，切换 DeepSeek、混元、通义只需改两个环境变量。
 7. **企微工程细节**：回调消息使用 AES 加解密（自行实现 WXBizMsgCrypt）；先在 5 秒内返回，再异步处理并主动回复；按 MsgId 幂等去重，防止企微重试导致重复写入；access_token 做缓存并在失效时自动刷新。
 8. **隐私**：手机号在展示和同步时脱敏；只使用国内模型，数据不出境；不使用「会话内容存档」，不抓取 HR 的私人聊天。
+9. **访问控制**（`app/auth.py`）：设置 `ACCESS_TOKEN` 后，看板和所有 `/api` 接口都需要先登录。登录状态保存在 HttpOnly 的签名 Cookie 里，修改口令后旧的登录全部失效；同一 IP 登录失败过多会被限流；脚本可以用 `Authorization: Bearer` 调用。企微回调不走口令，由企微签名和 AES 加密保护。正式环境（`SEED_DEMO_DATA=0`）禁止「重置数据」。
+10. **数据一致性**（`app/integrity.py`）：每次变更都会写一条变更流水，用流水从头重放的结果必须与当前状态一致。测试覆盖演示数据在一周内 34 个不同时间点生成的情况，以及真实业务操作后的审计链。
 
 ## 四、AI 效果评测
 
@@ -135,6 +138,8 @@ docker compose up -d --build        # 或：docker build -t recruit-ai . && dock
 docker build --build-arg PIP_INDEX_URL=https://mirrors.cloud.tencent.com/pypi/simple -t recruit-ai .
 ```
 
+> ⚠️ **部署到公网时必须设置 `ACCESS_TOKEN`**（看板里有候选人的个人信息），正式使用还要设置 `SEED_DEMO_DATA=0`（不生成演示数据，并禁止重置）。给面试官的在线预览可以保留演示数据，把口令和链接一起提供。
+
 镜像已经实测：构建后约 320MB，启动后 `/healthz` 健康检查通过（状态为 healthy），页面、消息处理和看板接口均正常。数据库挂载在 `./data`，重建容器不会丢数据。
 
 - 腾讯云轻量应用服务器（约 50 元/月）或云托管 CloudBase / Serverless 免费额度都可以运行。镜像只有几十 MB，单进程 SQLite 足以支撑单个团队使用。
@@ -158,6 +163,8 @@ docker build --build-arg PIP_INDEX_URL=https://mirrors.cloud.tencent.com/pypi/si
 app/
   main.py         FastAPI 入口：API、SSE、企微回调、定时任务
   agent.py        多轮对话智能体：Function Calling、5 个工具、多轮记忆、步数上限
+  auth.py         访问控制：口令登录、签名会话、失败限流
+  integrity.py    数据一致性检查（被 scripts/check_db.py 和测试复用）
   pipeline.py     核心流水线：路由（智能体 / 规则）→ 去重 → 状态机 → 写入 / 确认 → 同步
   extractor.py    AI 抽取（LLM Prompt + 规则兜底）、简历解析、时间换算
   nlq.py          自然语言问数（LLM 生成查询计划 → 代码执行 → LLM 解读）
@@ -170,9 +177,9 @@ app/
   domain.py       阶段 / 状态 / 岗位 / 渠道 词典
   db.py, seed.py  数据层、演示数据
 static/           前端演示台（原生 JS + ECharts，无需构建）
-tests/            31 项测试：抽取、流水线、问数、简历、智能体（模拟大模型服务器）、企微端到端（模拟企微服务器）
+tests/            74 项测试：抽取、流水线、问数、简历、智能体（模拟大模型服务器）、企微端到端（模拟企微服务器）、访问控制、数据一致性
 eval/             抽取准确率评测集（32 条标注样本）与评测脚本、评测报告
-scripts/doctor.py 接入自检
+scripts/          doctor.py 接入自检；check_db.py 数据库一致性检查
 docs/             真实环境接入手册
 ```
 
