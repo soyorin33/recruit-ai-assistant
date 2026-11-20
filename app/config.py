@@ -1,0 +1,74 @@
+"""全局配置：全部从环境变量 / .env 读取，未配置的能力自动降级。"""
+from __future__ import annotations
+
+import os
+from datetime import datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+from dotenv import load_dotenv
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(BASE_DIR / ".env")
+
+TZ = ZoneInfo(os.getenv("TZ_NAME", "Asia/Shanghai"))
+
+
+def now() -> datetime:
+    """统一使用北京时间（naive datetime，便于 SQLite 存储与比较）。"""
+    return datetime.now(TZ).replace(tzinfo=None, microsecond=0)
+
+
+def _env(key: str, default: str = "") -> str:
+    return os.getenv(key, default).strip()
+
+
+class Settings:
+    # ---- 大模型（任意 OpenAI 兼容接口：DeepSeek / 混元 / 通义 / Kimi ...）----
+    llm_api_key = _env("LLM_API_KEY")
+    llm_base_url = _env("LLM_BASE_URL", "https://api.deepseek.com/v1").rstrip("/")
+    llm_model = _env("LLM_MODEL", "deepseek-chat")
+    llm_timeout = float(_env("LLM_TIMEOUT", "30"))
+
+    # ---- 企业微信自建应用（接收消息 + 回复 + 智能表格 API）----
+    wecom_corp_id = _env("WECOM_CORP_ID")
+    wecom_agent_id = _env("WECOM_AGENT_ID")
+    wecom_secret = _env("WECOM_SECRET")
+    wecom_token = _env("WECOM_TOKEN")
+    wecom_aes_key = _env("WECOM_AES_KEY")
+    # 企微 API 地址（测试时可指向本地模拟服务器）
+    wecom_api_base = _env("WECOM_API_BASE", "https://qyapi.weixin.qq.com/cgi-bin").rstrip("/")
+
+    # ---- 企微群机器人 Webhook（推送日报 / 预警）----
+    wecom_webhook_url = _env("WECOM_WEBHOOK_URL")
+
+    # ---- 企微 / 腾讯文档 智能表格 ----
+    smartsheet_docid = _env("SMARTSHEET_DOCID")
+    smartsheet_sheet_id = _env("SMARTSHEET_SHEET_ID")
+
+    # ---- 业务参数 ----
+    db_path = _env("DB_PATH", str(BASE_DIR / "data" / "recruit.db"))
+    confidence_threshold = float(_env("CONFIDENCE_THRESHOLD", "0.8"))
+    stale_days = int(_env("STALE_DAYS", "3"))
+    report_time = _env("REPORT_TIME", "18:00")  # 每日日报推送时间
+    alert_time = _env("ALERT_TIME", "10:00")  # 每日超时预警推送时间
+    seed_demo_data = _env("SEED_DEMO_DATA", "1") == "1"
+
+    @property
+    def llm_enabled(self) -> bool:
+        return bool(self.llm_api_key)
+
+    @property
+    def wecom_app_enabled(self) -> bool:
+        return all([self.wecom_corp_id, self.wecom_secret, self.wecom_token, self.wecom_aes_key])
+
+    @property
+    def smartsheet_enabled(self) -> bool:
+        return bool(self.wecom_corp_id and self.wecom_secret and self.smartsheet_docid and self.smartsheet_sheet_id)
+
+    @property
+    def webhook_enabled(self) -> bool:
+        return bool(self.wecom_webhook_url)
+
+
+settings = Settings()

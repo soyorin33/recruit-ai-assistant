@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>招聘助手 · AI 招聘数据自动化</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%232a78d6'/><text x='16' y='22' font-size='16' text-anchor='middle' fill='white' font-family='sans-serif'>聘</text></svg>">
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
+  <script>window.echarts || document.write('<script src="https://unpkg.com/echarts@5.5.1/dist/echarts.min.js"><\/script>')</script>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <div class="brand-logo">聘</div>
+    <div>
+      <h1>招聘助手</h1>
+      <p>群里说一句，数据自动记、实时同步、自动出报表</p>
+    </div>
+  </div>
+  <div class="chips" id="chips"></div>
+  <div class="actions">
+    <button class="btn primary" id="btn-report">📊 生成日报</button>
+    <a class="btn" href="/api/export.csv">⬇ 导出表格</a>
+    <button class="btn" id="btn-reset" title="恢复为初始演示数据">↺ 重置演示</button>
+  </div>
+</header>
+
+<div class="layout">
+  <!-- 左：模拟企业微信群 -->
+  <section class="panel chat">
+    <div class="chat-head">
+      <div class="avatar-group">👥</div>
+      <div>
+        <b>招聘协作群（企业微信）</b>
+        <span>HR小王、HR小李、面试官们、🤖 招聘助手</span>
+      </div>
+    </div>
+    <div class="msgs" id="msgs"></div>
+    <div class="composer">
+      <div class="examples" id="examples"></div>
+      <div class="input-row">
+        <button class="icon-btn" id="btn-upload" title="上传简历（PDF / TXT）">📎</button>
+        <input type="file" id="file" accept=".pdf,.txt,.md" hidden>
+        <textarea id="input" placeholder="像在群里聊天一样输入，例如：张三 Java后端 BOSS来的，一面过了，明天下午3点二面，面试官陈晨"></textarea>
+        <button class="btn primary" id="btn-send">发送</button>
+      </div>
+      <div class="composer-hint">Enter 发送 · Shift+Enter 换行 · 📎 上传简历自动建档</div>
+    </div>
+  </section>
+
+  <!-- 右：数据 -->
+  <section class="panel main">
+    <nav class="tabs" role="tablist">
+      <button class="tab active" data-tab="dash">数据看板</button>
+      <button class="tab" data-tab="table">候选人总表 <span class="chip tnum" id="cand-count" style="padding:0 7px"></span></button>
+      <button class="tab" data-tab="alerts">跟进提醒 <span class="badge-n tnum hidden" id="alert-count"></span></button>
+    </nav>
+
+    <div class="tab-body" id="tab-dash">
+      <div class="kpis" id="kpis"></div>
+      <div class="grid2">
+        <div class="box">
+          <h3>招聘漏斗</h3>
+          <p class="desc">全部候选人到达各阶段的人数与环节转化率</p>
+          <div class="funnel" id="funnel"></div>
+        </div>
+        <div class="box">
+          <h3>近 14 天趋势</h3>
+          <p class="desc">每日新增简历 vs. AI 自动记录条数</p>
+          <div class="chart" id="chart-trend"></div>
+        </div>
+      </div>
+      <div class="grid2">
+        <div class="box">
+          <h3>各岗位在途候选人</h3>
+          <p class="desc">进行中的候选人按当前阶段分布</p>
+          <div class="legend" id="stage-legend"></div>
+          <div class="chart" id="chart-position"></div>
+        </div>
+        <div class="box">
+          <h3>渠道效果</h3>
+          <p class="desc">各渠道候选人数，右侧为进入复试及以上的比例</p>
+          <div class="chart" id="chart-channel"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="tab-body hidden" id="tab-table">
+      <div class="toolbar">
+        <input id="f-q" placeholder="搜索姓名 / 面试官 / 评价">
+        <select id="f-position"><option value="">全部岗位</option></select>
+        <select id="f-stage"><option value="">全部阶段</option></select>
+        <select id="f-status"><option value="">全部状态</option></select>
+        <span class="count tnum" id="f-count"></span>
+      </div>
+      <div class="table-wrap">
+        <table class="sheet">
+          <thead><tr>
+            <th>姓名</th><th>应聘岗位</th><th>渠道</th><th>当前阶段</th><th>状态</th><th>面试官</th>
+            <th>面试时间</th><th>面试评价 / 简历摘要</th><th>负责HR</th><th>最后更新</th>
+          </tr></thead>
+          <tbody id="sheet-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="tab-body hidden" id="tab-alerts">
+      <div class="toolbar">
+        <span style="color:var(--text-3);font-size:13px">系统每天定时检查；超时、漏填反馈会自动 @ 负责人</span>
+        <button class="btn sm" id="btn-push-alerts" style="margin-left:auto">推送提醒到企微群</button>
+      </div>
+      <div id="alerts"></div>
+    </div>
+  </section>
+</div>
+
+<div id="drawer-root"></div>
+<div class="toast" id="toast"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

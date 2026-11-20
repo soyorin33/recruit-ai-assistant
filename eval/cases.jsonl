@@ -1,0 +1,32 @@
+{"id": 1, "tag": "基础", "text": "张三 Java后端 BOSS来的，一面过了，明天下午3点二面，面试官陈晨", "expect": {"intent": "update", "candidates": [{"name": "张三", "position": "后端开发", "channel": "BOSS直聘", "stage": "复试", "status": "进行中", "interviewer": "陈晨", "interview_time": "2026-11-19 15:00"}]}}
+{"id": 2, "tag": "多人", "text": "王芳二面挂了，算法基础薄弱；赵磊接了offer", "known": [["王芳", "算法工程师", "复试"], ["赵磊", "后端开发", "复试"]], "expect": {"intent": "update", "candidates": [{"name": "王芳", "stage": "复试", "status": "已淘汰"}, {"name": "赵磊", "stage": "Offer", "status": "进行中"}]}}
+{"id": 3, "tag": "基础", "text": "孙浩今天入职了", "known": [["孙浩", "前端开发", "Offer"]], "expect": {"intent": "update", "candidates": [{"name": "孙浩", "stage": "已入职", "status": "已入职"}]}}
+{"id": 4, "tag": "基础", "text": "李雷 前端 内推 13800138000 约了周五上午10点一面 面试官林峰", "expect": {"intent": "update", "candidates": [{"name": "李雷", "position": "前端开发", "channel": "内推", "phone": "13800138000", "stage": "初试", "interviewer": "林峰", "interview_time": "2026-11-20 10:00"}]}}
+{"id": 5, "tag": "基础", "text": "陈静 数据分析 智联 简历通过了，约下周一下午2点半一面 面试官周强", "expect": {"intent": "update", "candidates": [{"name": "陈静", "position": "数据分析师", "channel": "智联招聘", "stage": "初试", "interviewer": "周强", "interview_time": "2026-11-23 14:30"}]}}
+{"id": 6, "tag": "基础", "text": "黄晓明 产品经理 猎聘投的简历", "expect": {"intent": "update", "candidates": [{"name": "黄晓明", "position": "产品经理", "channel": "猎聘", "stage": "简历筛选"}]}}
+{"id": 7, "tag": "基础", "text": "李娜拒了offer", "known": [["李娜", "产品经理", "Offer"]], "expect": {"intent": "update", "candidates": [{"name": "李娜", "status": "已放弃"}]}}
+{"id": 8, "tag": "基础", "text": "刘洋二面过了", "known": [["刘洋", "前端开发", "复试"]], "expect": {"intent": "update", "candidates": [{"name": "刘洋", "stage": "Offer"}]}}
+{"id": 9, "tag": "意图", "text": "本周前端进了几个二面？", "expect": {"intent": "query"}}
+{"id": 10, "tag": "意图", "text": "发一下今天的日报", "expect": {"intent": "report"}}
+{"id": 11, "tag": "意图", "text": "大家中午吃什么", "expect": {"intent": "chat"}}
+{"id": 12, "tag": "口语", "text": "刚面完周杰，技术还行但是沟通一般，先pass吧", "known": [["周杰", "后端开发", "初试"]], "expect": {"intent": "update", "candidates": [{"name": "周杰", "status": "已淘汰"}]}}
+{"id": 13, "tag": "口语", "text": "下午面的那个算法候选人吴昊，我觉得可以进下一轮", "known": [["吴昊", "算法工程师", "初试"]], "expect": {"intent": "update", "candidates": [{"name": "吴昊", "stage": "复试", "status": "进行中"}]}}
+{"id": 14, "tag": "口语", "text": "郑爽说考虑一下，薪资没谈拢，大概率不来了", "known": [["郑爽", "运营专员", "Offer"]], "expect": {"intent": "update", "candidates": [{"name": "郑爽", "status": "已放弃"}]}}
+{"id": 15, "tag": "多人", "text": "徐磊、钱程两个人都约了周四下午的一面，面试官都是陈晨", "expect": {"intent": "update", "candidates": [{"name": "徐磊", "stage": "初试", "interviewer": "陈晨", "interview_time": "2026-11-19 14:00"}, {"name": "钱程", "stage": "初试", "interviewer": "陈晨", "interview_time": "2026-11-19 14:00"}]}}
+{"id": 16, "tag": "时间", "text": "冯雪的终面定在11月25日上午9点半，面试官是许敏", "known": [["冯雪", "运营专员", "复试"]], "expect": {"intent": "update", "candidates": [{"name": "冯雪", "stage": "复试", "interviewer": "许敏", "interview_time": "2026-11-25 09:30"}]}}
+{"id": 17, "tag": "口语", "text": "蒋欣offer已经发了，下周一入职", "known": [["蒋欣", "测试工程师", "复试"]], "expect": {"intent": "update", "candidates": [{"name": "蒋欣", "stage": "Offer", "status": "进行中"}]}}
+{"id": 18, "tag": "口语", "text": "韩梅梅简历不太匹配，直接淘汰", "expect": {"intent": "update", "candidates": [{"name": "韩梅梅", "stage": "简历筛选", "status": "已淘汰"}]}}
+{"id": 19, "tag": "口语", "text": "高远是猎头推荐的，Go后端，5年经验，明天先电话初试", "expect": {"intent": "update", "candidates": [{"name": "高远", "position": "后端开发", "channel": "猎头", "stage": "初试"}]}}
+{"id": 20, "tag": "口语", "text": "罗琳一面面试官反馈很好，可以安排二面了", "known": [["罗琳", "UI设计师", "初试"]], "expect": {"intent": "update", "candidates": [{"name": "罗琳", "stage": "复试", "status": "进行中"}]}}
+{"id": 21, "tag": "口语", "text": "邓超没来面试，电话也打不通", "known": [["邓超", "销售经理", "初试"]], "expect": {"intent": "update", "candidates": [{"name": "邓超", "status": "已放弃"}]}}
+{"id": 22, "tag": "多人", "text": "今天新收了三份前端简历：许诺、田野、白露，都是BOSS上来的", "expect": {"intent": "update", "candidates": [{"name": "许诺", "position": "前端开发", "channel": "BOSS直聘", "stage": "简历筛选"}, {"name": "田野", "position": "前端开发", "channel": "BOSS直聘", "stage": "简历筛选"}, {"name": "白露", "position": "前端开发", "channel": "BOSS直聘", "stage": "简历筛选"}]}}
+{"id": 23, "tag": "时间", "text": "马丽的二面改到后天下午4点了", "known": [["马丽", "产品经理", "复试"]], "expect": {"intent": "update", "candidates": [{"name": "马丽", "stage": "复试", "interview_time": "2026-11-20 16:00"}]}}
+{"id": 24, "tag": "时间", "text": "宋雨琦 测试工程师 拉勾 约了明天上午十点一面", "expect": {"intent": "update", "candidates": [{"name": "宋雨琦", "position": "测试工程师", "channel": "拉勾", "stage": "初试", "interview_time": "2026-11-19 10:00"}]}}
+{"id": 25, "tag": "意图", "text": "这周进入复试的有哪些人？", "expect": {"intent": "query"}}
+{"id": 26, "tag": "意图", "text": "帮我统计一下各渠道的简历数量", "expect": {"intent": "query"}}
+{"id": 27, "tag": "意图", "text": "把今天的招聘情况汇总发群里", "expect": {"intent": "report"}}
+{"id": 28, "tag": "基础", "text": "唐宁 运营 官网投递 今天下午3点初试 面试官许敏", "expect": {"intent": "update", "candidates": [{"name": "唐宁", "position": "运营专员", "channel": "官网投递", "stage": "初试", "interviewer": "许敏", "interview_time": "2026-11-18 15:00"}]}}
+{"id": 29, "tag": "口语", "text": "曹阳三面也过了，准备发offer", "known": [["曹阳", "后端开发", "复试"]], "expect": {"intent": "update", "candidates": [{"name": "曹阳", "stage": "Offer"}]}}
+{"id": 30, "tag": "意图", "text": "谢天谢地终于招满了", "expect": {"intent": "chat"}}
+{"id": 31, "tag": "意图", "text": "明天的面试安排有哪些？", "expect": {"intent": "query"}}
+{"id": 32, "tag": "口语", "text": "那个做小程序的前端，叫林可的，BOSS上聊过了，人挺靠谱，约周五下午面一下", "expect": {"intent": "update", "candidates": [{"name": "林可", "position": "前端开发", "channel": "BOSS直聘", "stage": "初试", "interview_time": "2026-11-20 14:00"}]}}

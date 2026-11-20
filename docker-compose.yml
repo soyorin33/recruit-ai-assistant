@@ -1,0 +1,12 @@
+services:
+  recruit-ai:
+    build: .
+    image: recruit-ai:latest
+    ports:
+      - "8000:8000"
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
