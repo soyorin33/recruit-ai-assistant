@@ -53,7 +53,7 @@ python -m scripts.doctor              # 接入自检：逐项检查模型 / 企�
 ## 三、架构
 
 ```mermaid
-flowchart LR
+flowchart TB
   subgraph 输入["输入层（HR 原有习惯，零迁移）"]
     A1[企微应用消息<br/>文字 / 语音转文字]
     A2[企微发送简历文件]
