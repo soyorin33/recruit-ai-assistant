@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import json
 import logging
 import re
 from datetime import datetime, timedelta
@@ -151,6 +152,8 @@ def describe_plan(plan: dict, cand: dict | None = None) -> str:
             new, old = fmt_time(new), fmt_time(old)
         if k == "phone":
             new, old = mask_phone(new), mask_phone(old)
+        if k in ("match_detail", "resume_summary"):
+            continue
         if k == "feedback":
             parts.append(f"评价：{str(new)[-40:]}")
         elif new in (None, ""):
@@ -209,7 +212,7 @@ def _focus_of(payload: dict) -> list[int]:
 
 
 # ---------------- 消息入口 ----------------
-def handle_message(text: str, operator: str = "HR", source: str = "web") -> dict:
+def handle_message(text: str, operator: str = "HR", source: str = "web", progress=None) -> dict:
     """处理一条 HR 消息，返回机器人回复消息（已入库并推送）。
 
     配置了大模型 → 智能体（Function Calling + 多轮记忆）；未配置或调用失败 → 规则引擎（含指代消解）。
@@ -217,8 +220,13 @@ def handle_message(text: str, operator: str = "HR", source: str = "web") -> dict
     history, focus = conversation(operator)
     db.add_message("user", text, operator=operator, source=source)
     bus.publish("message", {})
+
+    def notify(t: str) -> None:  # 进度同时推给网页（SSE）和调用方（如企微流式回复）
+        bus.publish("progress", {"operator": operator, "text": t})
+        if progress:
+            progress(t)
     try:
-        payload = _route(text, operator, source, history, focus)
+        payload = _route(text, operator, source, history, focus, notify)
     except Exception as e:  # 兜底：任何异常都要给 HR 明确反馈，而不是沉默
         log.exception("处理消息失败")
         payload = {"kind": "error", "text": f"处理失败：{e}，请稍后重试或换个说法。"}
@@ -229,13 +237,13 @@ def handle_message(text: str, operator: str = "HR", source: str = "web") -> dict
     return msg
 
 
-def _route(text: str, operator: str, source: str, history: list[dict], focus: list[int]) -> dict:
+def _route(text: str, operator: str, source: str, history: list[dict], focus: list[int], notify=None) -> dict:
     bare = re.sub(r"@\S+\s*", "", text).strip().lower().rstrip("。!！")
     from .extractor import CANCEL_WORDS, CONFIRM_WORDS
     if settings.llm_enabled and bare not in CONFIRM_WORDS | CANCEL_WORDS:
         from . import agent
         try:
-            return agent.run(text, operator, source, history, focus)
+            return agent.run(text, operator, source, history, focus, progress=notify)
         except LLMError as e:
             log.warning("智能体不可用，降级规则引擎：%s", e)
             payload = _dispatch(text, operator, source, focus, use_llm=False)
@@ -282,16 +290,46 @@ def _dispatch(text: str, operator: str, source: str, focus: list[int] | None = N
     return process_candidates(ex["candidates"], ex["confidence"], ex["engine"], text, operator, source, meta)
 
 
+CROSS_FIELDS = {"stage": "阶段", "status": "状态", "interview_time": "面试时间"}
+
+
+def cross_check(cands: list[dict], raw_text: str) -> dict[str, list[str]]:
+    """用规则引擎独立再读一遍原话，与大模型结果比对。
+
+    只在两边都给出了明确值、且值不同时才判为冲突（规则没读出来不算冲突），
+    冲突项转人工确认。规则执行约 0.1ms，几乎零成本，却能拦下模型最危险的错误：阶段 / 状态判断错。
+    """
+    from .extractor import rules_extract_message
+    names = {r["name"] for r in db.q("SELECT DISTINCT name FROM candidates")}
+    names |= {c["name"] for c in cands}
+    rules = rules_extract_message(raw_text, [{"name": n} for n in names])
+    by_name = {c["name"]: c for c in rules.get("candidates", [])}
+    out: dict[str, list[str]] = {}
+    for c in cands:
+        rc = by_name.get(c["name"])
+        if not rc:
+            continue
+        diffs = [f"{label}（AI：{c[k]}，规则：{rc[k]}）" for k, label in CROSS_FIELDS.items()
+                 if c.get(k) and rc.get(k) and c[k] != rc[k]]
+        if diffs:
+            out[c["name"]] = ["规则复核不一致：" + "、".join(diffs)]
+    return out
+
+
 def process_candidates(cands: list[dict], confidence: float, engine: str, raw_text: str,
                        operator: str, source: str, meta: dict) -> dict:
     actions, lines = [], []
     low_conf = confidence < settings.confidence_threshold
     to_confirm = []
+    conflicts = cross_check(cands, raw_text) if settings.cross_check and engine in ("llm", "agent") else {}
+    if conflicts:
+        meta["cross_check"] = conflicts
     for c in cands:
         plan = plan_change(c)
-        if plan["op"] != "noop" and (low_conf or plan["reasons"]):
-            reasons = plan["reasons"] + ([f"AI 置信度 {confidence:.2f} 低于阈值 {settings.confidence_threshold}"]
-                                         if low_conf else [])
+        extra = conflicts.get(c["name"], [])
+        if plan["op"] != "noop" and (low_conf or plan["reasons"] or extra):
+            reasons = plan["reasons"] + extra + ([f"AI 置信度 {confidence:.2f} 低于阈值 {settings.confidence_threshold}"]
+                                                 if low_conf else [])
             to_confirm.append({**plan, "reasons": reasons})
             continue
         cand = apply_plan(plan, operator=operator, raw_text=raw_text, engine=engine, source=source)
@@ -383,17 +421,25 @@ def handle_resume(filename: str, content: bytes, operator: str = "HR", source: s
                 summary = r.get("summary") or ""
                 if r.get("education") and r["education"] not in summary:
                     summary = f"{r['education']}，{summary}"
+                from . import jd
+                years = r.get("years") if isinstance(r.get("years"), int) else None
+                m = jd.match(text, r.get("position"), years)
                 cand = {k: v for k, v in {
                     "name": r["name"], "phone": r.get("phone"), "email": r.get("email"),
                     "position": r.get("position"), "channel": channel, "stage": "简历筛选",
                     "status": STATUS_ACTIVE, "resume_summary": summary[:120] or None,
-                }.items() if v}
+                    "match_score": m["score"] if m else None,
+                    "match_detail": json.dumps(m, ensure_ascii=False) if m else None,
+                }.items() if v is not None and v != ""}
+                if m:
+                    meta["jd_match"] = m
                 conf = float(r.get("confidence") or 0.8)
                 payload = process_candidates([cand], conf, r.get("engine", ""), f"[简历] {filename}",
                                              operator, source, meta)
-                payload["text"] = f"📄 简历解析完成：{summary}\n" + payload["text"]
+                tail = ("\n" + jd.describe(m)) if m else ""
+                payload["text"] = f"📄 简历解析完成：{summary}\n" + payload["text"] + tail
                 if payload.get("web_text"):
-                    payload["web_text"] = f"📄 简历解析完成：{summary}\n" + payload["web_text"]
+                    payload["web_text"] = f"📄 简历解析完成：{summary}\n" + payload["web_text"] + tail
                 payload["kind"] = "update"
     except Exception as e:
         log.exception("简历处理失败")
@@ -401,3 +447,70 @@ def handle_resume(filename: str, content: bytes, operator: str = "HR", source: s
     msg = db.add_message("bot", payload.pop("text"), operator="招聘助手", source=source, payload=payload)
     bus.publish("message", {})
     return msg
+
+
+# ---------------- 截图入口 ----------------
+IMAGE_TYPE_LABEL = {"resume": "简历截图", "chat": "聊天截图", "other": "其他图片"}
+
+
+def handle_image(filename: str, content: bytes, operator: str = "HR", source: str = "web",
+                 progress=None) -> dict:
+    """简历截图 / 聊天截图 → 视觉模型识别 → 与文字消息同一条流水线入库。"""
+    from . import jd, vision
+    db.add_message("user", f"🖼️ {filename}", operator=operator, source=source, payload={"file": filename})
+    bus.publish("message", {})
+    try:
+        payload = _image_payload(filename, content, operator, source, progress, jd, vision)
+    except Exception as e:
+        log.exception("截图处理失败")
+        payload = {"kind": "error", "text": f"截图处理失败：{e}"}
+    payload["to"] = operator
+    payload.setdefault("focus", _focus_of(payload))
+    msg = db.add_message("bot", payload.pop("text"), operator="招聘助手", source=source, payload=payload)
+    bus.publish("message", {})
+    return msg
+
+
+def _image_payload(filename, content, operator, source, progress, jd, vision) -> dict:
+    if not settings.vision_enabled:
+        return {"kind": "error", "text": "截图识别需要配置视觉模型：在 .env 中设置 VISION_MODEL（如 qwen-vl-plus），"
+                                        "默认复用 LLM_API_KEY 和 LLM_BASE_URL。目前可以先发送文字或 PDF 简历。"}
+    if len(content) > 10 * 1024 * 1024:
+        return {"kind": "error", "text": "图片过大（上限 10MB）"}
+    bus.publish("progress", {"operator": operator, "text": "🖼️ 正在识别截图…"})
+    if progress:
+        progress("🖼️ 正在识别截图…")
+    try:
+        r = vision.recognize(content)
+    except LLMError as e:
+        return {"kind": "error", "text": f"截图识别失败：{e}"}
+    meta = {"intent": "image", "engine": "vision", "image_type": r["type"], "confidence": r.get("confidence"),
+            "llm_meta": r.get("llm_meta"), "candidates": r.get("candidates")}
+    if r["type"] == "other" or not r.get("candidates"):
+        return {"kind": "chat", "text": "这张图片里没有识别到候选人信息。可以发送简历截图或与候选人的聊天截图。",
+                "extraction": meta}
+    from .extractor import _clean_candidate
+    cands, tails = [], []
+    for raw in r["candidates"]:
+        c = _clean_candidate({**raw, "resume_summary": raw.get("summary")})
+        if not c:
+            continue
+        c.pop("stage", None)  # 截图只补充信息，不推断阶段；新候选人默认「简历筛选」
+        c.pop("status", None)
+        if r["type"] == "resume":
+            years = raw.get("years") if isinstance(raw.get("years"), int) else None
+            m = jd.match(r.get("text") or raw.get("summary") or "", c.get("position"), years)
+            if m:
+                c["match_score"], c["match_detail"] = m["score"], json.dumps(m, ensure_ascii=False)
+                tails.append(jd.describe(m))
+        cands.append(c)
+    if not cands:
+        return {"kind": "error", "text": "截图中没有识别到候选人姓名，请补充后重试。", "extraction": meta}
+    conf = min(float(r.get("confidence") or 0.7), 0.9)  # 图片识别天然更不确定，置信度封顶
+    payload = process_candidates(cands, conf, "vision", f"[截图] {filename}", operator, source, meta)
+    head = f"🖼️ 识别为{IMAGE_TYPE_LABEL[r['type']]}"
+    payload["text"] = head + "\n" + payload["text"] + ("\n" + "\n".join(tails) if tails else "")
+    if payload.get("web_text"):
+        payload["web_text"] = head + "\n" + payload["web_text"] + ("\n" + "\n".join(tails) if tails else "")
+    payload["kind"] = "update"
+    return payload

@@ -39,6 +39,34 @@ def load_cases() -> list[dict]:
     return [json.loads(line) for line in (ROOT / "cases.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
+XFIELDS = ["stage", "status", "interview_time"]
+
+
+def cross_stats(case: dict, out: dict, known: list[dict]) -> dict:
+    """交叉校验效果：规则引擎独立读同一句话，与被测结果冲突的字段会转人工确认。
+
+    - caught：被测结果错了、且被规则冲突拦下（好）
+    - false_alarm：被测结果是对的、却因规则冲突被打扰（成本）
+    规则引擎自评时，把标注答案当作「完美模型」的输出，得到误报率上限。
+    """
+    rules = extractor.rules_extract_message(case["text"], known)
+    rmap = {c["name"]: c for c in rules.get("candidates", [])}
+    gmap = {c.get("name"): c for c in out.get("candidates", [])}
+    st = {"checked": 0, "wrong": 0, "caught": 0, "false_alarm": 0}
+    for ec in case["expect"].get("candidates", []):
+        gc, rc = gmap.get(ec["name"]), rmap.get(ec["name"])
+        for f in XFIELDS:
+            if f not in ec or not gc or not gc.get(f):
+                continue
+            st["checked"] += 1
+            wrong = gc[f] != ec[f]
+            flagged = bool(rc and rc.get(f) and rc[f] != gc[f])
+            st["wrong"] += wrong
+            st["caught"] += wrong and flagged
+            st["false_alarm"] += (not wrong) and flagged
+    return st
+
+
 def run_engine(engine: str, cases: list[dict]) -> dict:
     extractor.now = lambda: BASE_NOW  # 冻结时间
     results, tokens_in, tokens_out, latencies = [], 0, 0, []
@@ -51,10 +79,12 @@ def run_engine(engine: str, cases: list[dict]) -> dict:
         except Exception as e:  # 记录失败，不中断评测
             out = {"intent": "error", "candidates": [], "error": str(e)[:120]}
         latencies.append((time.time() - t0) * 1000)
+        target = out if engine == "llm" else {"candidates": case["expect"].get("candidates", [])}
+        xs = cross_stats(case, target, known)
         meta = out.get("llm_meta") or {}
         tokens_in += meta.get("prompt_tokens") or 0
         tokens_out += meta.get("completion_tokens") or 0
-        results.append(score(case, out))
+        results.append({**score(case, out), "x": xs})
     return summarize(engine, results, latencies, tokens_in, tokens_out)
 
 
@@ -96,6 +126,7 @@ def summarize(engine: str, rs: list[dict], lat: list[float], tin: int, tout: int
     for r in rs:
         by_tag.setdefault(r["tag"], []).append(r["all_ok"])
     cost = (tin * PRICE_PER_M["input"] + tout * PRICE_PER_M["output"]) / 1e6
+    xs = {k: sum(r["x"][k] for r in rs) for k in ("checked", "wrong", "caught", "false_alarm")}
     return {
         "engine": engine if engine == "rules" else f"llm:{settings.llm_model}",
         "cases": n,
@@ -109,6 +140,7 @@ def summarize(engine: str, rs: list[dict], lat: list[float], tin: int, tout: int
         "tokens_per_msg": round((tin + tout) / n) if tin else None,
         "cost_per_1k_msgs_yuan": round(cost / n * 1000, 2) if tin else None,
         "failures": [r for r in rs if not r["all_ok"]],
+        "cross_check": xs,
     }
 
 
@@ -120,6 +152,12 @@ def print_summary(s: dict) -> None:
     print("分类别全对：", "，".join(f"{k} {v}" for k, v in s["by_tag"].items()))
     print(f"平均耗时 {s['avg_latency_ms']} ms" + (f"｜平均 {s['tokens_per_msg']} tokens/条｜约 {s['cost_per_1k_msgs_yuan']} 元/千条"
                                               if s["tokens_per_msg"] else ""))
+    x = s["cross_check"]
+    if s["engine"] == "rules":
+        print(f"交叉校验（假设大模型全对）：{x['checked']} 个关键字段中误报 {x['false_alarm']} 个"
+              f"（{x['false_alarm'] / max(1, x['checked']) * 100:.1f}% 会多一次人工确认）")
+    else:
+        print(f"交叉校验：模型错 {x['wrong']} 个关键字段，被拦下 {x['caught']} 个；误报 {x['false_alarm']} 个")
     for f in s["failures"]:
         print(f"  ✗ #{f['id']} [{f['tag']}] {f['text']}")
         for e in f["errors"][:4]:
@@ -137,6 +175,13 @@ def write_report(summaries: list[dict]) -> Path:
         lines.append(f"| {s['engine']} | {pct(s['intent_acc'])} | {pct(s['name_recall'])} | {s['extra_names']} | "
                      f"{pct(s['field_acc'])} | {pct(s['all_ok'])} | {s['avg_latency_ms']} ms | "
                      f"{('约 ' + str(s['cost_per_1k_msgs_yuan']) + ' 元') if s['cost_per_1k_msgs_yuan'] is not None else '0'} |")
+    lines += ["", "## 规则 × 大模型交叉校验", "",
+              "规则引擎独立读同一句话，与大模型在阶段 / 状态 / 面试时间上冲突时转人工确认。",
+              "", "| 引擎 | 关键字段数 | 模型出错 | 被拦下 | 误报（多一次确认） |", "|---|---|---|---|---|"]
+    for s in summaries:
+        x = s["cross_check"]
+        label = "完美模型（以标注为输出，测误报上限）" if s["engine"] == "rules" else s["engine"]
+        lines.append(f"| {label} | {x['checked']} | {x['wrong']} | {x['caught']} | {x['false_alarm']} |")
     lines += ["", "## 分类别全对数", "", "| 引擎 | " + " | ".join(summaries[0]["by_tag"]) + " |",
               "|---|" + "---|" * len(summaries[0]["by_tag"])]
     for s in summaries:

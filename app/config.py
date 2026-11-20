@@ -29,6 +29,10 @@ class Settings:
     llm_base_url = _env("LLM_BASE_URL", "https://api.deepseek.com/v1").rstrip("/")
     llm_model = _env("LLM_MODEL", "deepseek-chat")
     llm_timeout = float(_env("LLM_TIMEOUT", "30"))
+    # 视觉模型（截图识别）：默认复用上面的 Key 和地址，只需填模型名，如 qwen-vl-plus
+    vision_model = _env("VISION_MODEL")
+    vision_base_url = _env("VISION_BASE_URL").rstrip("/")
+    vision_api_key = _env("VISION_API_KEY")
 
     # ---- 企业微信自建应用（接收消息 + 回复 + 智能表格 API）----
     wecom_corp_id = _env("WECOM_CORP_ID")
@@ -38,6 +42,10 @@ class Settings:
     wecom_aes_key = _env("WECOM_AES_KEY")
     # 企微 API 地址（测试时可指向本地模拟服务器）
     wecom_api_base = _env("WECOM_API_BASE", "https://qyapi.weixin.qq.com/cgi-bin").rstrip("/")
+
+    # ---- 企微「智能机器人」API 模式（群里 @ 机器人）----
+    wecom_aibot_token = _env("WECOM_AIBOT_TOKEN")
+    wecom_aibot_aes_key = _env("WECOM_AIBOT_AES_KEY")
 
     # ---- 企微群机器人 Webhook（推送日报 / 预警）----
     wecom_webhook_url = _env("WECOM_WEBHOOK_URL")
@@ -53,6 +61,9 @@ class Settings:
     report_time = _env("REPORT_TIME", "18:00")  # 每日日报推送时间
     alert_time = _env("ALERT_TIME", "10:00")  # 每日超时预警推送时间
     seed_demo_data = _env("SEED_DEMO_DATA", "1") == "1"
+
+    # 规则与大模型交叉校验：两者对阶段 / 状态 / 面试时间的判断冲突时转人工确认
+    cross_check = _env("CROSS_CHECK", "1") == "1"
 
     # ---- 访问控制 ----
     # 设置后，看板与所有 /api 接口都需要先输入口令（部署到公网时必须设置）
@@ -73,8 +84,16 @@ class Settings:
         return bool(self.llm_api_key)
 
     @property
+    def vision_enabled(self) -> bool:
+        return bool(self.vision_model and (self.vision_api_key or self.llm_api_key))
+
+    @property
     def wecom_app_enabled(self) -> bool:
         return all([self.wecom_corp_id, self.wecom_secret, self.wecom_token, self.wecom_aes_key])
+
+    @property
+    def aibot_enabled(self) -> bool:
+        return bool(self.wecom_aibot_token and self.wecom_aibot_aes_key)
 
     @property
     def smartsheet_enabled(self) -> bool:

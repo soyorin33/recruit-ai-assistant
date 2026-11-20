@@ -6,9 +6,11 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import os
 import socket
 import struct
+import time
 import xml.etree.ElementTree as ET
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -60,6 +62,33 @@ class WXBizMsgCrypt:
         if receive_id != self.receive_id:
             raise WeComCryptoError("ReceiveId 不匹配")
         return msg.decode()
+
+    def decrypt_bytes(self, data: bytes) -> bytes:
+        """解密智能机器人推送的图片 / 文件：AES-256-CBC，IV 取密钥前 16 字节，PKCS#7 填充至 32 字节倍数。"""
+        dec = Cipher(algorithms.AES(self.key), modes.CBC(self.iv)).decryptor()
+        raw = dec.update(data) + dec.finalize()
+        pad = raw[-1]
+        if not 1 <= pad <= BLOCK or raw[-pad:] != bytes([pad]) * pad:
+            raise WeComCryptoError("文件解密填充错误")
+        return raw[:-pad]
+
+    def encrypt_bytes(self, data: bytes) -> bytes:
+        """decrypt_bytes 的逆过程（用于测试模拟企微推送的加密文件）。"""
+        pad = BLOCK - len(data) % BLOCK
+        enc = Cipher(algorithms.AES(self.key), modes.CBC(self.iv)).encryptor()
+        return enc.update(data + bytes([pad]) * pad) + enc.finalize()
+
+    # ---------- 智能机器人（JSON 协议） ----------
+    def decrypt_json(self, msg_signature: str, timestamp: str, nonce: str, body: dict) -> dict:
+        encrypt = body.get("encrypt") or ""
+        self.verify(msg_signature, timestamp, nonce, encrypt)
+        return json.loads(self.decrypt(encrypt))
+
+    def encrypt_json(self, payload: dict, nonce: str, timestamp: str | None = None) -> dict:
+        ts = timestamp or str(int(time.time()))
+        encrypt = self.encrypt(json.dumps(payload, ensure_ascii=False))
+        return {"encrypt": encrypt, "msgsignature": self.signature(ts, nonce, encrypt), "timestamp": int(ts),
+                "nonce": nonce}
 
     # ---------- 业务封装 ----------
     def verify_url(self, msg_signature: str, timestamp: str, nonce: str, echostr: str) -> str:

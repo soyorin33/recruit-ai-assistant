@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS candidates (
     status TEXT NOT NULL DEFAULT '进行中',
     interviewer TEXT, interview_time TEXT,
     feedback TEXT, resume_summary TEXT,
+    match_score INTEGER, match_detail TEXT,
     hr_owner TEXT,
     created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
@@ -79,7 +80,15 @@ class DB:
             self.conn.execute("PRAGMA journal_mode=WAL")
             self.conn.execute("PRAGMA busy_timeout=5000")
             self.conn.executescript(SCHEMA)
+            self._migrate()
             self.conn.commit()
+
+    def _migrate(self) -> None:
+        """轻量迁移：给旧版本数据库补上新增的列（SQLite 只支持 ADD COLUMN）。"""
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(candidates)")}
+        for name, typ in (("match_score", "INTEGER"), ("match_detail", "TEXT")):
+            if name not in cols:
+                self.conn.execute(f"ALTER TABLE candidates ADD COLUMN {name} {typ}")
 
     # ---------- 通用 ----------
     def q(self, sql: str, args: tuple = ()) -> list[dict]:

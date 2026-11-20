@@ -203,6 +203,13 @@ def parse_time(text: str, base: datetime | None = None) -> str | None:
             day = base.replace(month=int(m.group(1)), day=int(m.group(2)))
         except ValueError:
             day = None
+    elif m := re.search(r"(?<![\d月])([12]?\d|3[01])[日号](?!线)", t):  # 「25号」：本月，已过则下月
+        try:
+            day = base.replace(day=int(m.group(1)))
+            if day.date() < base.date():
+                day = (day.replace(day=1) + timedelta(days=32)).replace(day=int(m.group(1)))
+        except ValueError:
+            day = None
     elif m := re.search(r"(下下|下个?)?(周|星期|礼拜)([一二三四五六日天1-7])", t):
         wd_char = m.group(3)
         target = "一二三四五六日".find(wd_char) if wd_char in "一二三四五六日" else (6 if wd_char == "天" else int(wd_char) - 1)

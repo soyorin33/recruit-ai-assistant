@@ -211,6 +211,10 @@ tr.flash { animation: flash 3s ease-out; }
 .status.s-已淘汰 { background: var(--critical-soft); color: var(--critical-ink); }
 .status.s-已放弃 { background: var(--muted-soft); color: var(--text-3); }
 
+.match-box { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; margin-bottom: 16px; background: var(--surface-2); }
+.match-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.match-box .kv { margin-bottom: 8px; }
+
 /* 提醒 */
 .alert-group { margin-bottom: 18px; }
 .alert-group h3 { font-size: 14px; margin: 0 0 8px; display: flex; align-items: center; gap: 8px; }

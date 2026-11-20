@@ -250,8 +250,19 @@ def focus_text(focus_ids: list[int]) -> str:
                      + (f"，面试 {r['interview_time']}" if r.get("interview_time") else "") + "）" for r in rows)
 
 
-def run(text: str, operator: str, source: str, history: list[dict], focus_ids: list[int]) -> dict:
-    """执行一轮智能体对话，返回机器人回复 payload（含 text）。大模型不可用时抛出 LLMError 由上层降级。"""
+PROGRESS_TEXT = {"record_candidates": "📝 正在记录候选人…", "search_candidates": "🔍 正在查找候选人…",
+                 "get_candidate": "📇 正在查看候选人详情…", "query_data": "📊 正在统计数据…",
+                 "daily_report": "📰 正在生成日报…"}
+
+
+def run(text: str, operator: str, source: str, history: list[dict], focus_ids: list[int],
+        progress=None) -> dict:
+    """执行一轮智能体对话，返回机器人回复 payload（含 text）。大模型不可用时抛出 LLMError 由上层降级。
+
+    progress(text)：每一步开始前回调，用于网页「正在…」提示和企微流式消息的实时刷新。
+    """
+    notify = progress or (lambda _t: None)
+    notify("🤔 正在理解消息…")
     n = now()
     system = SYSTEM_PROMPT.format(now=n.strftime("%Y-%m-%d %H:%M"), weekday=WEEKDAYS[n.weekday()],
                                   field_rules=field_rules(), focus=focus_text(focus_ids))
@@ -259,6 +270,8 @@ def run(text: str, operator: str, source: str, history: list[dict], focus_ids: l
     ctx = Ctx(operator=operator, source=source, raw_text=text)
     t0, tokens, final = time.time(), 0, ""
     for _ in range(MAX_STEPS):
+        if ctx.steps:
+            notify("✍️ 正在组织回复…")
         msg, meta = llm.chat_tools(messages, TOOLS)
         tokens += (meta.get("prompt_tokens") or 0) + (meta.get("completion_tokens") or 0)
         calls = msg.get("tool_calls") or []
@@ -273,6 +286,7 @@ def run(text: str, operator: str, source: str, history: list[dict], focus_ids: l
             except json.JSONDecodeError:
                 args = {}
             impl = TOOL_IMPL.get(name)
+            notify(PROGRESS_TEXT.get(name, f"正在执行 {name}…"))
             try:
                 result = impl(ctx, args) if impl else {"error": f"未知工具 {name}"}
             except Exception as e:  # 工具异常反馈给模型，由模型向 HR 解释

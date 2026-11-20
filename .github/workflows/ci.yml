@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: 测试 + 评测
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+      - name: 运行测试
+        run: python -m pytest -q
+      - name: 抽取准确率评测（规则引擎）
+        run: python -m eval.run_eval
+      - name: 演示数据一致性检查
+        run: |
+          python -c "from app.db import DB; from app.seed import seed; d = DB('ci.db'); seed(d, 'hi')"
+          python -m scripts.check_db ci.db
+
+  docker:
+    name: Docker 镜像构建
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 构建镜像
+        run: docker build -t recruit-ai:ci .
+      - name: 启动并健康检查
+        run: |
+          docker run -d --name app -p 8000:8000 recruit-ai:ci
+          for i in $(seq 1 30); do curl -sf localhost:8000/healthz && exit 0; sleep 1; done
+          docker logs app; exit 1

@@ -30,3 +30,5 @@
 {"id": 30, "tag": "意图", "text": "谢天谢地终于招满了", "expect": {"intent": "chat"}}
 {"id": 31, "tag": "意图", "text": "明天的面试安排有哪些？", "expect": {"intent": "query"}}
 {"id": 32, "tag": "口语", "text": "那个做小程序的前端，叫林可的，BOSS上聊过了，人挺靠谱，约周五下午面一下", "expect": {"intent": "update", "candidates": [{"name": "林可", "position": "前端开发", "channel": "BOSS直聘", "stage": "初试", "interview_time": "2026-11-20 14:00"}]}}
+{"id": 33, "tag": "时间", "text": "蔡琳 前端 内推 约了25号下午3点一面", "expect": {"intent": "update", "candidates": [{"name": "蔡琳", "position": "前端开发", "channel": "内推", "stage": "初试", "interview_time": "2026-11-25 15:00"}]}}
+{"id": 34, "tag": "时间", "text": "邹凯的复试定在3号上午10点", "known": [["邹凯", "后端开发", "复试"]], "expect": {"intent": "update", "candidates": [{"name": "邹凯", "stage": "复试", "interview_time": "2026-12-03 10:00"}]}}

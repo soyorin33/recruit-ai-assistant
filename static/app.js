@@ -79,6 +79,8 @@
       chip(st.wecom_app, st.wecom_app ? "企微应用：已接入" : "企微应用：未接入", "接收 HR 在企业微信中发给招聘助手的消息"),
       chip(st.smartsheet.enabled, st.smartsheet.enabled ? `智能表格：已同步 ${st.smartsheet.synced}` : "智能表格：未配置", st.smartsheet.last_error || "候选人变更自动写入企微智能表格"),
       chip(st.webhook, st.webhook ? "群机器人：已接入" : "群机器人：未配置", "日报 / 预警推送到企微群"),
+      chip(st.aibot, st.aibot ? "群 @ 助手：已接入" : "群 @ 助手：未配置", "企微智能机器人：在群里 @招聘助手 即可记录 / 查询"),
+      chip(st.vision.enabled, st.vision.enabled ? `截图识别：${st.vision.model}` : "截图识别：未配置", "配置 VISION_MODEL 后可识别简历截图、聊天截图"),
       chip(st.auth_enabled, st.auth_enabled ? "访问：已加口令" : "访问：未加口令（仅限本机）",
         st.auth_enabled ? "看板与接口需要登录" : "部署到公网前请设置 ACCESS_TOKEN"),
     );
@@ -397,9 +399,33 @@
       h("td", {}, h("span", { class: `status s-${c.status}` }, c.status)),
       h("td", { class: "nowrap" }, c.interviewer || "—"),
       h("td", { class: "nowrap tnum" }, shortTime(c.interview_time) || "—"),
+      h("td", {}, matchBadge(c.match_score, c.match_detail)),
       h("td", { class: "fb", title: c.feedback || c.resume_summary || "" }, c.feedback || c.resume_summary || "—"),
       h("td", { class: "nowrap" }, c.hr_owner || "—"),
       h("td", { class: "nowrap tnum" }, shortTime(c.updated_at)))));
+  }
+
+  function parseMatch(detail) {
+    try { return detail ? JSON.parse(detail) : null; } catch { return null; }
+  }
+
+  function matchBadge(score, detail) {
+    if (score == null) return "—";
+    const m = parseMatch(detail) || {};
+    const cls = score >= 75 ? "s-已入职" : score >= 55 ? "s-进行中" : "s-已淘汰";
+    return h("span", { class: `status ${cls} tnum`, title: m.level || "" }, `${score} 分`);
+  }
+
+  function matchSection(c) {
+    const m = parseMatch(c.match_detail);
+    if (!m) return null;
+    const list = (title, items) => items && items.length ? [h("dt", {}, title), h("dd", {}, items.join("、"))] : [];
+    return h("div", { class: "match-box" },
+      h("div", { class: "match-head" }, h("b", {}, "🎯 岗位匹配度"), matchBadge(c.match_score, c.match_detail),
+        h("span", { class: "msg-meta" }, `${m.level} · ${m.engine === "llm" ? "大模型评估" : "规则评估"}`)),
+      h("dl", { class: "kv" }, ...list("命中", m.matched), ...list("缺失", m.missing), ...list("亮点", m.highlights), ...list("风险", m.risks)),
+      m.questions?.length ? h("div", {}, h("div", { class: "msg-meta" }, "建议面试问题"),
+        h("ol", { class: "steps" }, ...m.questions.map((q) => h("li", {}, q)))) : null);
   }
 
   async function openDrawer(id) {
@@ -408,7 +434,7 @@
     const kv = [["应聘岗位", c.position], ["渠道", c.channel], ["当前阶段", c.stage], ["状态", c.status], ["手机", c.phone],
       ["邮箱", c.email], ["面试官", c.interviewer], ["面试时间", c.interview_time], ["面试评价", c.feedback],
       ["简历摘要", c.resume_summary], ["负责HR", c.hr_owner], ["建档时间", c.created_at]].filter(([, v]) => v);
-    const LBL = { stage: "阶段", status: "状态", position: "岗位", channel: "渠道", interviewer: "面试官", interview_time: "面试时间", feedback: "评价", name: "姓名", resume_summary: "简历摘要", hr_owner: "负责HR", email: "邮箱" };
+    const LBL = { match_score: "匹配度", stage: "阶段", status: "状态", position: "岗位", channel: "渠道", interviewer: "面试官", interview_time: "面试时间", feedback: "评价", name: "姓名", resume_summary: "简历摘要", hr_owner: "负责HR", email: "邮箱" };
     $("drawer-root").replaceChildren(
       h("div", { class: "drawer-mask", onclick: close }),
       h("aside", { class: "drawer", role: "dialog", "aria-label": `${c.name} 详情` },
@@ -416,9 +442,10 @@
           h("button", { class: "btn sm", style: "margin-left:auto", onclick: close }, "关闭")),
         h("div", { class: "drawer-body" },
           h("dl", { class: "kv" }, ...kv.flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, v)])),
+          matchSection(c),
           h("h3", { style: "font-size:14px;margin:0 0 10px" }, "变更记录（可追溯到原始消息）"),
           h("div", { class: "timeline" }, ...events.map((e) => h("div", { class: "tl-item" },
-            h("div", { class: "tl-time tnum" }, `${e.ts.slice(5, 16)} · ${e.operator || ""} · ${e.engine === "llm" ? "大模型" : e.engine === "rules" ? "规则引擎" : "系统"}${e.source === "wecom" ? " · 企业微信" : ""}`),
+            h("div", { class: "tl-time tnum" }, `${e.ts.slice(5, 16)} · ${e.operator || ""} · ${{ llm: "大模型", agent: "智能体", vision: "截图识别", rules: "规则引擎" }[e.engine] || "系统"}${e.source === "wecom" ? " · 企业微信" : ""}`),
             h("div", {}, e.action === "create" ? "建档" : Object.entries(e.changes).filter(([k]) => LBL[k]).map(([k, [o, n]]) => `${LBL[k]}：${o ? o + " → " : ""}${n ?? "清空"}`).join("；")),
             e.raw_text ? h("div", { class: "tl-raw" }, "💬 ", e.raw_text) : null)))))
     );
@@ -450,7 +477,12 @@
   let pendingRefresh = null;
   function connectStream() {
     const es = new EventSource("/api/stream");
-    es.onmessage = () => {
+    es.onmessage = (e) => {
+      const data = JSON.parse(e.data || "{}");
+      const mine = (data.progress || []).filter((p) => p.operator === OPERATOR).at(-1);
+      const typing = document.getElementById("typing");
+      if (mine && typing) typing.textContent = mine.text; // 智能体每一步实时显示
+      if ((data.kinds || []).every((k) => k === "progress")) return; // 纯进度事件无需刷新数据
       clearTimeout(pendingRefresh);
       pendingRefresh = setTimeout(refreshAll, 150); // 合并短时间内的多次变更
     };

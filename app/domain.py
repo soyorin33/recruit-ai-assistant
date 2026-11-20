@@ -25,6 +25,7 @@ FIELD_LABELS = {
     "channel": "渠道", "stage": "当前阶段", "status": "状态", "interviewer": "面试官",
     "interview_time": "面试时间", "feedback": "面试评价", "resume_summary": "简历摘要",
     "hr_owner": "负责HR", "created_at": "建档时间", "updated_at": "最后更新",
+    "match_score": "岗位匹配度", "match_detail": "匹配详情",
 }
 
 # 岗位词典：(正则, 标准岗位名)，按优先级排列

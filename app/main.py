@@ -154,6 +154,8 @@ def status() -> dict:
         "wecom_app": settings.wecom_app_enabled,
         "smartsheet": {**sync.status, "enabled": settings.smartsheet_enabled},
         "webhook": settings.webhook_enabled,
+        "aibot": settings.aibot_enabled,
+        "vision": {"enabled": settings.vision_enabled, "model": settings.vision_model or None},
         "confidence_threshold": settings.confidence_threshold,
         "stale_days": settings.stale_days,
         "auth_enabled": settings.auth_enabled,
@@ -171,6 +173,12 @@ def dashboard() -> dict:
 @app.get("/api/candidates")
 def candidates() -> dict:
     return {"items": analytics.candidates_table(), "labels": FIELD_LABELS}
+
+
+@app.get("/api/jds")
+def jds() -> dict:
+    from .jd import load_jds
+    return {"items": load_jds()}
 
 
 @app.get("/api/candidates/{cid}")
@@ -200,6 +208,9 @@ async def upload_resume(file: UploadFile = File(...), operator: str = Form("HR�
     content = await file.read()
     if len(content) > 10 * 1024 * 1024:
         raise HTTPException(413, "文件过大（上限 10MB）")
+    from .vision import sniff_mime
+    if sniff_mime(content):  # 图片 → 截图识别
+        return await asyncio.to_thread(pipeline.handle_image, file.filename or "image.png", content, operator, "web")
     return await asyncio.to_thread(pipeline.handle_resume, file.filename or "resume.txt", content,
                                    operator, "web", channel)
 
@@ -273,7 +284,8 @@ async def stream(request: Request) -> StreamingResponse:
             evs = bus.since(last)
             if evs:
                 last = evs[-1]["id"]
-                yield f"data: {json.dumps({'id': last, 'kinds': sorted({e['kind'] for e in evs})})}\n\n"
+                progress = [e["data"] for e in evs if e["kind"] == "progress"]
+                yield f"data: {json.dumps({'id': last, 'kinds': sorted({e['kind'] for e in evs}), 'progress': progress}, ensure_ascii=False)}\n\n"
                 idle = 0
             else:
                 idle += 1
@@ -283,6 +295,37 @@ async def stream(request: Request) -> StreamingResponse:
 
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+# ======================= 企业微信「智能机器人」（群里 @ 机器人） =======================
+def _aibot():
+    if not settings.aibot_enabled:
+        raise HTTPException(503, "未配置企业微信智能机器人")
+    from .wecom import aibot
+    return aibot
+
+
+@app.get("/wecom/aibot")
+def aibot_verify(msg_signature: str, timestamp: str, nonce: str, echostr: str) -> PlainTextResponse:
+    from .wecom.crypto import WeComCryptoError
+    try:
+        return PlainTextResponse(_aibot().crypt().verify_url(msg_signature, timestamp, nonce, echostr))
+    except WeComCryptoError as e:
+        raise HTTPException(403, str(e))
+
+
+@app.post("/wecom/aibot")
+async def aibot_receive(request: Request, msg_signature: str, timestamp: str, nonce: str) -> Response:
+    """群里 @招聘助手 的消息。用流式消息回复：先返回「正在处理」，企微随后带 stream.id 回调拉取进度和结果。"""
+    from .wecom.crypto import WeComCryptoError
+    bot = _aibot()
+    try:
+        data = bot.crypt().decrypt_json(msg_signature, timestamp, nonce, json.loads(await request.body()))
+    except (WeComCryptoError, ValueError) as e:
+        log.warning("智能机器人回调解密失败：%s", e)
+        raise HTTPException(403, "invalid message")
+    reply = await asyncio.to_thread(bot.handle, data, nonce)
+    return JSONResponse(reply) if reply else PlainTextResponse("")
 
 
 # ======================= 企业微信回调 =======================
@@ -316,10 +359,12 @@ def _wecom_text(user: str, content: str) -> None:
 
 
 def _wecom_file(user: str, media_id: str) -> None:
+    from .vision import sniff_mime
     from .wecom import api
     try:
         filename, content = api.download_media(media_id)
-        msg = pipeline.handle_resume(filename, content, operator=user, source="wecom")
+        handler = pipeline.handle_image if sniff_mime(content) else pipeline.handle_resume
+        msg = handler(filename, content, operator=user, source="wecom")
         api.send_text(user, msg["text"])
     except Exception:
         log.exception("处理企微文件失败")
@@ -342,7 +387,7 @@ async def wecom_receive(request: Request, background: BackgroundTasks, msg_signa
     user, mtype = msg.get("FromUserName", ""), msg.get("MsgType")
     if mtype == "text" and msg.get("Content", "").strip():
         background.add_task(_wecom_text, user, msg["Content"].strip())
-    elif mtype == "file" and msg.get("MediaId"):
+    elif mtype in ("file", "image") and msg.get("MediaId"):
         background.add_task(_wecom_file, user, msg["MediaId"])
     elif mtype == "voice" and msg.get("Recognition"):  # 开启语音识别后可直接拿到文字
         background.add_task(_wecom_text, user, msg["Recognition"])

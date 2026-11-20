@@ -41,12 +41,12 @@
     <div class="composer">
       <div class="examples" id="examples"></div>
       <div class="input-row">
-        <button class="icon-btn" id="btn-upload" title="上传简历（PDF / TXT）">📎</button>
-        <input type="file" id="file" accept=".pdf,.txt,.md" hidden>
+        <button class="icon-btn" id="btn-upload" title="上传简历（PDF / TXT）或截图（简历截图 / 聊天截图）">📎</button>
+        <input type="file" id="file" accept=".pdf,.txt,.md,.png,.jpg,.jpeg,.webp" hidden>
         <textarea id="input" placeholder="像在群里聊天一样输入，例如：张三 Java后端 BOSS来的，一面过了，明天下午3点二面，面试官陈晨"></textarea>
         <button class="btn primary" id="btn-send">发送</button>
       </div>
-      <div class="composer-hint">Enter 发送 · Shift+Enter 换行 · 📎 上传简历自动建档</div>
+      <div class="composer-hint">Enter 发送 · Shift+Enter 换行 · 📎 上传简历或截图自动建档</div>
     </div>
   </section>
 
@@ -99,7 +99,7 @@
         <table class="sheet">
           <thead><tr>
             <th>姓名</th><th>应聘岗位</th><th>渠道</th><th>当前阶段</th><th>状态</th><th>面试官</th>
-            <th>面试时间</th><th>面试评价 / 简历摘要</th><th>负责HR</th><th>最后更新</th>
+            <th>面试时间</th><th>匹配度</th><th>面试评价 / 简历摘要</th><th>负责HR</th><th>最后更新</th>
           </tr></thead>
           <tbody id="sheet-body"></tbody>
         </table>

@@ -30,12 +30,16 @@ def _extract_json(text: str) -> dict:
 
 
 def chat(messages: list[dict], *, json_mode: bool = False, temperature: float = 0.1,
-         max_tokens: int = 1200) -> tuple[str, dict]:
-    """返回 (内容, 用量信息)。"""
-    if not settings.llm_enabled:
+         max_tokens: int = 1200, model: str | None = None, base_url: str | None = None,
+         api_key: str | None = None) -> tuple[str, dict]:
+    """返回 (内容, 用量信息)。model / base_url / api_key 可覆盖默认配置（视觉模型用）。"""
+    api_key = api_key or settings.llm_api_key
+    base_url = (base_url or settings.llm_base_url).rstrip("/")
+    model = model or settings.llm_model
+    if not api_key:
         raise LLMError("未配置 LLM_API_KEY")
     body: dict = {
-        "model": settings.llm_model,
+        "model": model,
         "messages": messages,
         "temperature": temperature,
         "max_tokens": max_tokens,
@@ -45,8 +49,8 @@ def chat(messages: list[dict], *, json_mode: bool = False, temperature: float = 
     t0 = time.time()
     try:
         resp = httpx.post(
-            f"{settings.llm_base_url}/chat/completions",
-            headers={"Authorization": f"Bearer {settings.llm_api_key}"},
+            f"{base_url}/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}"},
             json=body,
             timeout=settings.llm_timeout,
         )
@@ -54,8 +58,8 @@ def chat(messages: list[dict], *, json_mode: bool = False, temperature: float = 
             # 个别模型不支持 response_format，去掉后重试一次
             body.pop("response_format", None)
             resp = httpx.post(
-                f"{settings.llm_base_url}/chat/completions",
-                headers={"Authorization": f"Bearer {settings.llm_api_key}"},
+                f"{base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}"},
                 json=body,
                 timeout=settings.llm_timeout,
             )
@@ -66,7 +70,7 @@ def chat(messages: list[dict], *, json_mode: bool = False, temperature: float = 
     content = data["choices"][0]["message"]["content"] or ""
     usage = data.get("usage") or {}
     meta = {
-        "model": settings.llm_model,
+        "model": model,
         "latency_ms": int((time.time() - t0) * 1000),
         "prompt_tokens": usage.get("prompt_tokens"),
         "completion_tokens": usage.get("completion_tokens"),
