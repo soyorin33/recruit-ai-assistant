@@ -119,3 +119,17 @@ def test_sync_failure_recorded_once_and_retry(monkeypatch):
     called = []
     monkeypatch.setattr(sync, "retry", lambda c: called.append(c) or True)
     assert client.post(f"/api/failures/{items[0]['id']}/retry", json={}).json()["ok"] and called == [cid]
+
+
+def test_static_assets_are_versioned_and_not_stale():
+    """页面里的脚本 / 样式带内容版本号，且要求浏览器每次确认：避免「新页面 + 旧脚本」导致按钮没反应。"""
+    import hashlib
+    import re
+    from pathlib import Path
+    r = client.get("/")
+    assert r.headers["cache-control"] == "no-cache"
+    m = re.search(r'src="/static/app\.js\?v=(\w+)"', r.text)
+    js = (Path(__file__).resolve().parent.parent / "static/app.js").read_bytes()
+    assert m and m.group(1) == hashlib.md5(js).hexdigest()[:10]
+    assert re.search(r'href="/static/style\.css\?v=\w+"', r.text)
+    assert client.get("/static/app.js").headers["cache-control"] == "no-cache"

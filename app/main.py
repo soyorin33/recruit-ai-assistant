@@ -3,14 +3,17 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import hashlib
 import io
 import json
 import logging
+import re
 from collections import deque
 from contextlib import asynccontextmanager
 
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response, StreamingResponse
+from fastapi.responses import (HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response,
+                               StreamingResponse)
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -104,7 +107,10 @@ async def access_control(request: Request, call_next):
         if path.startswith("/api/"):
             return JSONResponse({"detail": "未登录或登录已过期"}, status_code=401)
         return RedirectResponse("/login")
-    return await call_next(request)
+    resp = await call_next(request)
+    if path.startswith("/static/"):
+        resp.headers.setdefault("Cache-Control", "no-cache")
+    return resp
 
 
 # ======================= 登录 =======================
@@ -116,7 +122,7 @@ class LoginIn(BaseModel):
 def login_page() -> Response:
     if not settings.auth_enabled:
         return RedirectResponse("/")
-    return FileResponse(STATIC / "login.html")
+    return _page("login.html")
 
 
 @app.post("/api/login")
@@ -168,9 +174,24 @@ class FailureIn(BaseModel):
     note: str = ""
 
 
+NO_CACHE = {"Cache-Control": "no-cache"}  # 浏览器每次都向服务器确认（文件没变时返回 304，几乎没有开销）
+
+
+def _page(name: str) -> HTMLResponse:
+    """返回页面，并给 /static/xxx.js|css 加上按文件内容计算的版本号：代码一更新，浏览器立刻拿到新文件，
+    不会出现「页面是新的、脚本还是旧的」导致按钮没反应。"""
+    html = (STATIC / name).read_text(encoding="utf-8")
+
+    def versioned(m: re.Match) -> str:
+        f = STATIC / m.group(2)
+        v = hashlib.md5(f.read_bytes()).hexdigest()[:10] if f.is_file() else "0"
+        return f'{m.group(1)}/static/{m.group(2)}?v={v}"'
+    return HTMLResponse(re.sub(r'((?:src|href)=")/static/([\w./-]+\.(?:js|css))"', versioned, html), headers=NO_CACHE)
+
+
 @app.get("/")
-def index() -> FileResponse:
-    return FileResponse(STATIC / "index.html")
+def index() -> HTMLResponse:
+    return _page("index.html")
 
 
 @app.get("/healthz")
