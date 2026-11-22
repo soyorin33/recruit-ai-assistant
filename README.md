@@ -27,7 +27,8 @@
 |---|---|
 | **HR / 招聘团队成员**：想知道怎么用 | [使用手册](docs/user-guide.md)：群里怎么说、确认卡片、看板、待人工处理、常见问题 |
 | **管理员**：想部署到自己的服务器 | [部署教程](docs/deploy-guide.md)：从买服务器到同事能打开，约 30 分钟；含更新、备份、清空演示数据、换域名 |
-| **管理员**：想接入企微 / 腾讯文档 / 大模型 | [接入手册](docs/wecom-setup.md)：每一步的配置项、自检命令和常见错误码 |
+| **管理员**：想把机器人拉进企微群、把数据同步到腾讯文档 | [接入教程](docs/integration-guide.md)：手把手讲注册企业微信、创建机器人、建腾讯文档表格、部署、验证；不需要域名和备案 |
+| **管理员 / 开发者**：需要自建应用回调、企微智能表格等高级接入 | [高级接入手册](docs/wecom-setup.md)：全部接入方式的配置项、协议细节和错误码 |
 | **开发者 / 面试官**：想了解设计和实现 | 本页下方的[架构](#三架构)、[关键设计](#关键设计ai-应用能力的体现)和 [AI 效果评测](#四ai-效果评测) |
 
 ### 💡 30 秒看懂怎么用
@@ -191,7 +192,7 @@ DeepSeek 唯一的错误是把「蒋欣offer已经发了，下周一入职」判
 
 ## 五、接入真实企业微信 / 腾讯文档
 
-完整步骤、自检命令和常见错误码见 **[docs/wecom-setup.md](docs/wecom-setup.md)**。**个人、没有域名也能走通的路径**：
+**第一次接入请看 [接入教程（手把手）](docs/integration-guide.md)**：从注册企业微信、创建机器人、建腾讯文档表格，到部署和验证，一步步讲清楚。全部接入方式的配置项、协议细节和错误码见 [高级接入手册](docs/wecom-setup.md)。**个人、没有域名也能走通的路径**：
 
 1. **大模型**（5 分钟）：在 `.env` 中填写 Key；填上 `VISION_MODEL` 即可开启截图识别
 2. **群 @ 助手**（10 分钟）：创建企微智能机器人，接入方式选「长连接」，填 `WECOM_AIBOT_ID` / `WECOM_AIBOT_SECRET`；拉进群并 @ 一次，之后日报和提醒由它自动推送到群里
@@ -279,7 +280,7 @@ tests/            134 项测试（CI 中 SQLite、MySQL 各跑一遍）：抽取
 eval/             agent_scenarios.py 智能体多轮场景测试；抽取准确率评测集（34 条标注样本）与评测脚本、评测报告
 scripts/          doctor.py 接入自检；check_db.py 数据库一致性检查；tdocs_setup.py 一键创建腾讯文档总表；migrate_to_mysql.py SQLite → MySQL 迁移
 deploy/           云服务器部署：docker-compose（应用 + MySQL + Caddy）、Caddyfile（域名 + 自动 HTTPS）、Caddyfile.http（IP 直接访问）、一键部署脚本
-docs/             user-guide.md 使用手册；deploy-guide.md 部署教程；wecom-setup.md 企微 / 腾讯文档接入手册
+docs/             user-guide.md 使用手册；deploy-guide.md 部署教程；integration-guide.md 企微机器人 + 腾讯文档接入教程；wecom-setup.md 高级接入手册（技术细节）
 ```
 
 ## 九、后续规划

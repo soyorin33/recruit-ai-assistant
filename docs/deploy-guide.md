@@ -97,13 +97,13 @@ docker run --rm hello-world
 cp .env.example .env
 ```
 
-用编辑器打开 `.env`，按需填写。各项的获取方法见 [企微 / 腾讯文档接入手册](wecom-setup.md)：
+用编辑器打开 `.env`，按需填写。各项怎么获取，按 [接入教程：企微机器人 + 腾讯文档](integration-guide.md) 一步步做即可：
 
 | 配置 | 必填？ | 说明 |
 |---|---|---|
 | `LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL` | 建议填 | 不填时使用本地规则引擎，也能跑，但口语理解差很多 |
 | `WECOM_AIBOT_ID` / `WECOM_AIBOT_SECRET` | 要在群里用就填 | 企微「智能机器人」，接入方式选**长连接**，不需要域名 |
-| `TDOCS_*` | 要同步腾讯文档就填 | 先在本机运行 `python -m scripts.tdocs_setup` 自动建表并写入 |
+| `TDOCS_*` | 要同步腾讯文档就填 | 先填 `TDOCS_TOKEN`，再运行建表脚本自动建表并写入其余几项（本机或服务器上运行都可以，见[接入教程第 4 节](integration-guide.md#4-接入腾讯文档10-分钟)） |
 | `WECOM_USER_NAMES` | 可选 | 企微账号显示为中文名，格式 `zhangsan=张三,lisi=李四` |
 | `ACCESS_TOKEN`、`MYSQL_PASSWORD` | **不用填** | 部署脚本会在服务器上随机生成，只保存在服务器上 |
 
