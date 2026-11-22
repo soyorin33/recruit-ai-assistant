@@ -23,10 +23,12 @@ def test_seed_has_no_time_travel(monkeypatch, fake_now):
     assert all(c["updated_at"] <= fake_now.strftime("%Y-%m-%d %H:%M:%S") for c in d.all_candidates())
 
 
-def test_schema_indexes_and_wal():
+def test_schema_indexes_and_integrity():
     s = summary(db)
-    assert s["sqlite_integrity"] == "ok" and s["journal_mode"] == "wal"
-    assert {"idx_candidates_name", "idx_candidates_phone", "idx_events_candidate"} <= set(s["indexes"])
+    assert s["integrity"] == "ok"
+    assert s["mode"] == ("InnoDB" if db.dialect == "mysql" else "wal")
+    assert {"idx_candidates_name", "idx_candidates_phone", "idx_events_candidate",
+            "uq_candidates_phone_position"} <= set(s["indexes"])
 
 
 def test_pipeline_keeps_audit_chain():

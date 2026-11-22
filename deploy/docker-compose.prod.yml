@@ -1,14 +1,38 @@
-# 线上部署：应用 + Caddy（HTTPS）。在服务器的项目根目录执行：
-#   DOMAIN=你的域名 docker compose -f deploy/docker-compose.prod.yml up -d --build
+# 线上部署：应用 + MySQL + Caddy（自动 HTTPS）。由 deploy/deploy.sh 调用：
+#   docker compose --env-file deploy/server.env -f deploy/docker-compose.prod.yml up -d --build
+# server.env 只保存在服务器上（访问口令、MySQL 密码），首次部署时随机生成，重新部署不会覆盖。
 services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: recruit
+      MYSQL_USER: recruit
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?缺少 MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD:?缺少 MYSQL_PASSWORD}
+    # 小内存服务器（2G）：把 InnoDB 缓冲池限制在 128M
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_bin", "--innodb-buffer-pool-size=128M"]
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
   recruit-ai:
     build: ..
     image: recruit-ai:latest
     env_file:
-      - path: ../.env            # 大模型等配置（由部署脚本从本机复制）
+      - path: ../.env            # 大模型、企微、腾讯文档等配置（由部署脚本从本机复制）
         required: false
-      - path: server.env         # 仅服务器保存：访问口令等，重新部署不会覆盖
+      - path: server.env         # 仅服务器保存：访问口令、MySQL 密码
         required: false
+    environment:
+      DATABASE_URL: mysql://recruit:${MYSQL_PASSWORD}@mysql:3306/recruit
+    depends_on:
+      mysql:
+        condition: service_healthy
     volumes:
       - ../data:/app/data
     restart: unless-stopped
@@ -28,4 +52,5 @@ services:
     restart: unless-stopped
 
 volumes:
+  mysql_data:
   caddy_data:

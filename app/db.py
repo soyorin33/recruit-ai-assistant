@@ -1,20 +1,30 @@
-"""SQLite 数据层：候选人主表 + 变更事件流水 + 待确认队列 + 消息记录。
+"""数据层：候选人主表 + 变更事件流水 + 待确认队列 + 消息记录。支持 MySQL 与 SQLite 两种后端。
 
-生产环境中「智能表格」是 HR 看到的单一数据源；本地 SQLite 作为
-处理缓存 / 事件审计 / 离线兜底，二者通过 sync 模块保持一致。
+- 设置 DATABASE_URL=mysql://用户:密码@主机:3306/库名 时使用 MySQL（docker-compose 部署默认）
+- 未设置时使用 SQLite 文件 DB_PATH（本机零配置快速体验、单元测试）
+业务代码只写标准 SQL 和 ? 占位符，方言差异（占位符、建表语句、UPSERT、自增重置、表结构查询）都收敛在本文件。
+时间统一存为「YYYY-MM-DD HH:MM:SS」文本：两种数据库下排序、比较、截取行为一致。
+
+去重相关的约束：同一手机号 + 同一岗位只能有一条应聘记录（唯一索引 uq_candidates_phone_position），
+作为代码层加锁之外的最后一道防线（例如将来多进程部署时）。
 """
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 from .config import now, settings
 
-SCHEMA = """
+log = logging.getLogger("db")
+
+SQLITE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS candidates (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
@@ -73,6 +83,62 @@ CREATE TABLE IF NOT EXISTS tdocs_map (
 );
 """
 
+# MySQL：建索引 / 主键的文本列必须是 VARCHAR；排序规则用 utf8mb4_bin（区分大小写，与 SQLite 一致——
+# 腾讯文档 record_id、企微 chatid 都区分大小写）
+_T = "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin"
+MYSQL_SCHEMA = [
+    f"""CREATE TABLE IF NOT EXISTS candidates (
+        id INT PRIMARY KEY AUTO_INCREMENT,
+        name VARCHAR(100) NOT NULL,
+        phone VARCHAR(32), email VARCHAR(255),
+        position VARCHAR(100), channel VARCHAR(100),
+        stage VARCHAR(32) NOT NULL DEFAULT '简历筛选',
+        status VARCHAR(32) NOT NULL DEFAULT '进行中',
+        interviewer VARCHAR(255), interview_time VARCHAR(19),
+        feedback TEXT, resume_summary TEXT,
+        match_score INT, match_detail TEXT,
+        hr_owner VARCHAR(100),
+        created_at VARCHAR(19) NOT NULL, updated_at VARCHAR(19) NOT NULL,
+        KEY idx_candidates_name (name), KEY idx_candidates_phone (phone),
+        KEY idx_candidates_updated (updated_at),
+        UNIQUE KEY uq_candidates_phone_position (phone, position)
+    ) {_T}""",
+    f"""CREATE TABLE IF NOT EXISTS events (
+        id INT PRIMARY KEY AUTO_INCREMENT,
+        candidate_id INT NOT NULL,
+        ts VARCHAR(19) NOT NULL,
+        operator VARCHAR(100), action VARCHAR(32),
+        changes MEDIUMTEXT,
+        stage_to VARCHAR(32), status_to VARCHAR(32),
+        raw_text MEDIUMTEXT, engine VARCHAR(32), source VARCHAR(32),
+        KEY idx_events_ts (ts), KEY idx_events_candidate (candidate_id, ts)
+    ) {_T}""",
+    f"""CREATE TABLE IF NOT EXISTS pending (
+        id INT PRIMARY KEY AUTO_INCREMENT,
+        created_at VARCHAR(19) NOT NULL,
+        operator VARCHAR(100), source VARCHAR(32),
+        raw_text MEDIUMTEXT, proposal MEDIUMTEXT, reasons TEXT,
+        state VARCHAR(16) NOT NULL DEFAULT 'open'
+    ) {_T}""",
+    f"""CREATE TABLE IF NOT EXISTS messages (
+        id INT PRIMARY KEY AUTO_INCREMENT,
+        ts VARCHAR(19) NOT NULL,
+        role VARCHAR(16) NOT NULL,
+        operator VARCHAR(100), source VARCHAR(32),
+        text MEDIUMTEXT, payload MEDIUMTEXT
+    ) {_T}""",
+    f"CREATE TABLE IF NOT EXISTS sync_map (candidate_id INT PRIMARY KEY, record_id VARCHAR(128) NOT NULL) {_T}",
+    f"""CREATE TABLE IF NOT EXISTS push_chats (
+        chatid VARCHAR(128) PRIMARY KEY,
+        chattype VARCHAR(16) NOT NULL DEFAULT 'group',
+        enabled TINYINT NOT NULL DEFAULT 1,
+        first_seen VARCHAR(19) NOT NULL, last_seen VARCHAR(19) NOT NULL
+    ) {_T}""",
+    f"CREATE TABLE IF NOT EXISTS tdocs_map (candidate_id INT PRIMARY KEY, record_id VARCHAR(128) NOT NULL) {_T}",
+]
+TABLES = ("candidates", "events", "pending", "messages", "sync_map", "push_chats", "tdocs_map")
+RESET_TABLES = ("candidates", "events", "pending", "messages", "sync_map", "tdocs_map")  # 推送目标群不随演示重置清空
+
 TS_FMT = "%Y-%m-%d %H:%M:%S"
 
 
@@ -80,31 +146,132 @@ def ts(dt: datetime | None = None) -> str:
     return (dt or now()).strftime(TS_FMT)
 
 
+class DuplicateError(Exception):
+    """违反唯一约束（如同一手机号 + 同一岗位重复建档）。"""
+
+
+def to_mysql_sql(sql: str) -> str:
+    """? 占位符 → %s；字面量 % → %%（PyMySQL 用 % 格式化）。单引号字符串里的 ? 不替换。"""
+    out, in_str = [], False
+    for ch in sql:
+        if ch == "'":
+            in_str = not in_str
+            out.append(ch)
+        elif ch == "%":
+            out.append("%%")
+        elif ch == "?" and not in_str:
+            out.append("%s")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def parse_mysql_url(url: str) -> dict:
+    u = urlparse(url)
+    return {"host": u.hostname or "127.0.0.1", "port": u.port or 3306, "user": unquote(u.username or "root"),
+            "password": unquote(u.password or ""), "database": (u.path or "/recruit").lstrip("/") or "recruit"}
+
+
 class DB:
-    def __init__(self, path: str):
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(path, check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row
+    def __init__(self, target: str):
+        """target：mysql://… 连接串，或 SQLite 文件路径。"""
         self.lock = threading.RLock()
-        with self.lock:
-            # WAL：看板读取与消息写入互不阻塞；busy_timeout：自检 / 评测脚本并发访问时等待而不是报错
-            self.conn.execute("PRAGMA journal_mode=WAL")
-            self.conn.execute("PRAGMA busy_timeout=5000")
-            self.conn.executescript(SCHEMA)
-            self._migrate()
+        self.dialect = "mysql" if target.startswith(("mysql://", "mysql+pymysql://")) else "sqlite"
+        if self.dialect == "mysql":
+            self.cfg = parse_mysql_url(target)
+            self._connect_mysql(wait=60)
+            with self.lock:
+                for stmt in MYSQL_SCHEMA:
+                    self._raw(stmt)
+                self._migrate()
+        else:
+            Path(target).parent.mkdir(parents=True, exist_ok=True)
+            self.conn = sqlite3.connect(target, check_same_thread=False)
+            self.conn.row_factory = sqlite3.Row
+            with self.lock:
+                # WAL：看板读取与消息写入互不阻塞；busy_timeout：自检 / 评测脚本并发访问时等待而不是报错
+                self.conn.execute("PRAGMA journal_mode=WAL")
+                self.conn.execute("PRAGMA busy_timeout=5000")
+                self.conn.executescript(SQLITE_SCHEMA)
+                self._migrate()
+                self.conn.commit()
+
+    # ---------- 连接 ----------
+    def _connect_mysql(self, wait: int = 0) -> None:
+        import pymysql
+        deadline = time.time() + wait
+        while True:
+            try:
+                self.conn = pymysql.connect(**self.cfg, charset="utf8mb4", autocommit=True, connect_timeout=10,
+                                            cursorclass=pymysql.cursors.DictCursor)
+                return
+            except pymysql.err.OperationalError as e:
+                if time.time() >= deadline:
+                    raise
+                log.info("等待 MySQL 就绪：%s", e)
+                time.sleep(2)
+
+    def _raw(self, sql: str, args: tuple = ()) -> tuple[list[dict], int]:
+        """执行一条 SQL，返回 (结果行, lastrowid)。MySQL 断线（如超过 wait_timeout）时自动重连重试一次。"""
+        if self.dialect == "sqlite":
+            try:
+                cur = self.conn.execute(sql, args)
+            except sqlite3.IntegrityError as e:
+                raise DuplicateError(str(e)) from e
+            rows = [dict(r) for r in cur.fetchall()] if cur.description else []
             self.conn.commit()
+            return rows, cur.lastrowid
+        import pymysql
+        for attempt in (0, 1):
+            try:
+                with self.conn.cursor() as cur:
+                    cur.execute(to_mysql_sql(sql), args)
+                    rows = list(cur.fetchall()) if cur.description else []
+                    return rows, cur.lastrowid
+            except pymysql.err.IntegrityError as e:
+                if e.args and e.args[0] == 1062:  # Duplicate entry
+                    raise DuplicateError(str(e)) from e
+                raise
+            except (pymysql.err.OperationalError, pymysql.err.InterfaceError):
+                if attempt:
+                    raise
+                log.warning("MySQL 连接已断开，重连中")
+                self._connect_mysql(wait=10)
+        return [], 0
+
+    # ---------- 结构迁移 ----------
+    def columns(self, table: str) -> set[str]:
+        if self.dialect == "mysql":
+            rows, _ = self._raw("SELECT COLUMN_NAME AS c FROM information_schema.COLUMNS "
+                                "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=?", (table,))
+            return {r["c"] for r in rows}
+        return {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")}
+
+    def index_names(self) -> list[str]:
+        if self.dialect == "mysql":
+            rows, _ = self._raw("SELECT DISTINCT INDEX_NAME AS n FROM information_schema.STATISTICS "
+                                "WHERE TABLE_SCHEMA=DATABASE() AND INDEX_NAME<>'PRIMARY'")
+        else:
+            rows, _ = self._raw("SELECT name AS n FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'")
+        return sorted(r["n"] for r in rows)
 
     def _migrate(self) -> None:
-        """轻量迁移：给旧版本数据库补上新增的列（SQLite 只支持 ADD COLUMN）。"""
-        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(candidates)")}
+        """轻量迁移：给旧版本数据库补上新增的列和唯一约束。"""
+        cols = self.columns("candidates")
         for name, typ in (("match_score", "INTEGER"), ("match_detail", "TEXT")):
             if name not in cols:
-                self.conn.execute(f"ALTER TABLE candidates ADD COLUMN {name} {typ}")
+                self._raw(f"ALTER TABLE candidates ADD COLUMN {name} {typ}")
+        if "uq_candidates_phone_position" not in self.index_names():
+            sql = ("CREATE UNIQUE INDEX uq_candidates_phone_position ON candidates(phone, position)")
+            try:
+                self._raw(sql)
+            except Exception as e:  # noqa: BLE001  旧数据里已有重复：不阻止启动，由 check_db 报告
+                log.warning("唯一约束（手机号 + 岗位）未能创建，旧数据中存在重复：%s", e)
 
     # ---------- 通用 ----------
     def q(self, sql: str, args: tuple = ()) -> list[dict]:
         with self.lock:
-            return [dict(r) for r in self.conn.execute(sql, args).fetchall()]
+            return self._raw(sql, args)[0]
 
     def one(self, sql: str, args: tuple = ()) -> dict | None:
         rows = self.q(sql, args)
@@ -112,16 +279,17 @@ class DB:
 
     def exec(self, sql: str, args: tuple = ()) -> int:
         with self.lock:
-            cur = self.conn.execute(sql, args)
-            self.conn.commit()
-            return cur.lastrowid
+            return self._raw(sql, args)[1]
 
     def reset(self) -> None:
         with self.lock:
-            for t in ("candidates", "events", "pending", "messages", "sync_map", "tdocs_map"):
-                self.conn.execute(f"DELETE FROM {t}")
-            self.conn.execute("DELETE FROM sqlite_sequence")
-            self.conn.commit()
+            for t in RESET_TABLES:
+                if self.dialect == "mysql":
+                    self._raw(f"TRUNCATE TABLE {t}")  # 同时重置自增编号
+                else:
+                    self._raw(f"DELETE FROM {t}")
+            if self.dialect == "sqlite":
+                self._raw("DELETE FROM sqlite_sequence")
 
     # ---------- 候选人 ----------
     def get_candidate(self, cid: int) -> dict | None:
@@ -217,8 +385,8 @@ class DB:
         return row["record_id"] if row else None
 
     def set_record_id(self, cid: int, record_id: str, target: str = "wecom") -> None:
-        self.exec(f"INSERT OR REPLACE INTO {self.MAP_TABLES[target]} (candidate_id, record_id) VALUES (?,?)",
-                  (cid, record_id))
+        verb = "REPLACE INTO" if self.dialect == "mysql" else "INSERT OR REPLACE INTO"
+        self.exec(f"{verb} {self.MAP_TABLES[target]} (candidate_id, record_id) VALUES (?,?)", (cid, record_id))
 
     # 日报 / 提醒的推送目标：招聘助手被 @ 过的群（不随演示数据重置而清空）
     def touch_push_chat(self, chatid: str, chattype: str = "group", auto_enable: bool = True) -> bool:
@@ -242,7 +410,7 @@ class DB:
         self.exec(f"DELETE FROM {self.MAP_TABLES[target]}")
 
 
-db = DB(settings.db_path)
+db = DB(settings.database_url or settings.db_path)
 
 
 def to_json(obj: Any) -> str:

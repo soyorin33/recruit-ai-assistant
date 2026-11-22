@@ -40,6 +40,7 @@ SYSTEM_PROMPT = """你是企业微信里的「招聘助手」智能体，服务�
 - 工具返回「待确认」时，告诉 HR 需要回复「确认」或点击卡片确认。
 - 【重要】修改数据只能通过调用 record_candidates 完成。本轮没有成功调用它，就绝不能说「已改 / 已记录 / 已更新」。
 - 【重要】不要自己用文字向 HR 索要「确认」：即使变更有风险（如阶段回退），也直接调用 record_candidates，系统会自动判断是否需要 HR 确认并生成确认卡片。
+- record_candidates 的结果里如果有 notes（如「渠道以首次投递为准」「该候选人由某 HR 负责」），回复时要如实转述，不要自己另编原因，也不要声称做了 notes 以外的操作（如「已加备注」）。
 - 对话历史只用于理解上下文，其中描述的数据可能已过时，以工具查询结果为准。
 
 {field_rules}
@@ -157,14 +158,17 @@ def t_record(ctx: Ctx, args: dict) -> dict:
     for a in payload.get("actions", []):
         if a["type"] == "pending":
             for p in a["plans"]:
-                results.append({"name": p["name"], "result": "待HR确认", "reasons": a["reasons"]})
+                results.append({"name": p["name"], "result": "待HR确认", "reasons": a["reasons"],
+                                **({"notes": p["notes"]} if p.get("notes") else {})})
                 if p.get("candidate_id"):
                     ctx.focus.append(p["candidate_id"])
         else:
             ctx.focus.append(a["candidate"]["id"])
             results.append({"name": a["candidate"]["name"], "candidate_id": a["candidate"]["id"],
                             "result": {"create": "已新建", "update": "已更新", "noop": "无变化"}[a["type"]],
-                            "changes": {k: v[1] for k, v in a["changes"].items() if k != "name"}})
+                            "changes": {k: v[1] for k, v in a["changes"].items() if k != "name"},
+                            # 系统规则带来的提示（如渠道以首次投递为准、由其他 HR 负责），模型回复时必须如实转述
+                            **({"notes": a["notes"]} if a.get("notes") else {})})
     return {"results": results}
 
 

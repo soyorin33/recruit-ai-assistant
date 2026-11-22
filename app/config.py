@@ -15,7 +15,7 @@ TZ = ZoneInfo(os.getenv("TZ_NAME", "Asia/Shanghai"))
 
 
 def now() -> datetime:
-    """统一使用北京时间（naive datetime，便于 SQLite 存储与比较）。"""
+    """统一使用北京时间（naive datetime，存为文本，两种数据库下比较行为一致）。"""
     return datetime.now(TZ).replace(tzinfo=None, microsecond=0)
 
 
@@ -76,6 +76,8 @@ class Settings:
     tdocs_url = _env("TDOCS_URL")
 
     # ---- 业务参数 ----
+    # 数据库：设置 DATABASE_URL（mysql://用户:密码@主机:3306/库名）用 MySQL；不设置则用 SQLite 文件 DB_PATH
+    database_url = _env("DATABASE_URL")
     db_path = _env("DB_PATH", str(BASE_DIR / "data" / "recruit.db"))
     confidence_threshold = float(_env("CONFIDENCE_THRESHOLD", "0.8"))
     stale_days = int(_env("STALE_DAYS", "3"))

@@ -5,11 +5,12 @@ import io
 import json
 import logging
 import re
+import threading
 from datetime import datetime, timedelta
 
 from . import bus
 from .config import now, settings
-from .db import db
+from .db import DuplicateError, db
 from .domain import (
     FIELD_LABELS, STAGE_INDEX, STATUS_ACTIVE, STATUS_DROPPED, STATUS_HIRED, STATUS_REJECTED, mask_phone,
 )
@@ -56,10 +57,17 @@ def known_candidates() -> list[dict]:
 
 
 # ---------------- 实体对齐 + 变更计划 ----------------
+# 「查找有没有这个人 → 没有就新建」必须原子执行，否则两位 HR 同时录入同一个新人会建出两条记录。
+# 单实例部署下用进程内锁串行化；数据库上的唯一约束（手机号 + 岗位）兜底跨进程的情况。
+WRITE_LOCK = threading.RLock()
+
+
 def plan_change(c: dict) -> dict:
     c = dict(c)
     reasons: list[str] = []
+    notes: list[str] = []  # 不需要确认、但要告诉 HR 的提示
     existing = None
+    skip_name_match = False
     cid = c.pop("candidate_id", None)
     if cid:  # 智能体通过上下文 / 搜索拿到的编号，优先使用
         existing = db.get_candidate(int(cid))
@@ -68,9 +76,21 @@ def plan_change(c: dict) -> dict:
         elif existing["name"] != c["name"]:
             reasons.append(f"编号 #{cid} 对应的是「{existing['name']}」，与「{c['name']}」不一致，请确认")
     if existing is None and c.get("phone"):
-        hits = db.find_by_phone(c["phone"])
-        existing = hits[0] if hits else None
-    if existing is None and not cid:
+        # 一条记录 = 一个人应聘一个岗位：手机号相同还要看岗位，同一个人投了新岗位应新增一条应聘记录，
+        # 不能把原来那个岗位的记录改掉
+        hits = sorted(db.find_by_phone(c["phone"]), key=lambda h: h["updated_at"], reverse=True)
+        pos = c.get("position")
+        same = [h for h in hits if not pos or h.get("position") in (pos, None, "")]
+        if same:
+            existing = same[0]
+            if len(same) > 1:
+                reasons.append(f"该手机号有 {len(same)} 条应聘记录（{'、'.join(h.get('position') or '岗位未填' for h in same)}），"
+                               f"默认匹配最近更新的「{existing.get('position')}」")
+        elif hits:
+            skip_name_match = True
+            reasons.append(f"此人（手机号相同）已在应聘「{'、'.join(h.get('position') or '岗位未填' for h in hits)}」，"
+                           f"将新增一条「{pos}」的应聘记录")
+    if existing is None and not cid and not skip_name_match:
         hits = db.find_by_name(c["name"])
         if c.get("position") and len(hits) >= 1:
             same_pos = [h for h in hits if h.get("position") in (c["position"], None, "")]
@@ -87,9 +107,13 @@ def plan_change(c: dict) -> dict:
         if fields.get("stage") == "已入职":
             fields["status"] = STATUS_HIRED
         return {"op": "create", "name": c["name"], "fields": fields,
-                "changes": {k: [None, v] for k, v in fields.items()}, "reasons": reasons}
+                "changes": {k: [None, v] for k, v in fields.items()}, "reasons": reasons, "notes": notes}
 
     new = dict(c)
+    # 渠道以首次投递为准：渠道统计依赖「首次来源」，后来的渠道只提示、记入流水原文，不覆盖
+    if new.get("channel") and existing.get("channel") and new["channel"] != existing["channel"]:
+        notes.append(f"渠道以首次投递为准，保留「{existing['channel']}」（本次提到「{new['channel']}」）")
+        new.pop("channel")
     old_stage, old_status = existing["stage"], existing["status"]
     if new.get("stage") == "已入职" or new.get("status") == STATUS_HIRED:
         new["stage"], new["status"] = "已入职", STATUS_HIRED
@@ -103,6 +127,11 @@ def plan_change(c: dict) -> dict:
             new["feedback"] = old_fb
         elif not new_fb.startswith(old_fb):  # 新的一条评价 → 追加；若已包含原评价（如确认时重算），保持不变
             new["feedback"] = (old_fb + "；" + new_fb)[-150:]
+
+    # 一条记录对应一个岗位的应聘：改岗位等于丢掉原来那次应聘，必须让 HR 明确确认
+    if new.get("position") and existing.get("position") and new["position"] != existing["position"]:
+        reasons.append(f"应聘岗位将从「{existing['position']}」改为「{new['position']}」；"
+                       f"如果是同一人又投了新岗位，请回复「取消」，再发送一次并带上手机号，系统会新增一条应聘记录")
 
     # ---- 状态机校验 ----
     if "stage" in new and new["stage"] != old_stage:
@@ -118,13 +147,23 @@ def plan_change(c: dict) -> dict:
     changes = {k: [existing.get(k), v] for k, v in new.items()
                if k != "name" and (existing.get(k) or None) != (v or None)}
     return {"op": "update" if changes else "noop", "name": existing["name"], "candidate_id": existing["id"],
-            "fields": {k: v[1] for k, v in changes.items()}, "changes": changes, "reasons": reasons,
+            "fields": {k: v[1] for k, v in changes.items()}, "changes": changes, "reasons": reasons, "notes": notes,
             "before": {"stage": old_stage, "status": old_status, "position": existing.get("position")}}
 
 
 def apply_plan(plan: dict, *, operator: str, raw_text: str, engine: str, source: str) -> dict:
     if plan["op"] == "create":
-        cid = db.create_candidate({**plan["fields"], "hr_owner": operator})
+        try:
+            cid = db.create_candidate({**plan["fields"], "hr_owner": operator})
+        except DuplicateError:
+            # 数据库唯一约束拦下了重复建档（另一个进程刚刚录入了同一手机号 + 岗位）：不重复建，返回已有记录
+            f = plan["fields"]
+            hit = next((h for h in db.find_by_phone(f.get("phone")) if h.get("position") == f.get("position")), None)
+            if not hit:
+                raise
+            plan.update(op="noop", candidate_id=hit["id"], changes={})
+            plan.setdefault("notes", []).append("该候选人刚刚已被录入，没有重复建档")
+            return hit
         db.add_event(cid, "create", plan["changes"], operator=operator, raw_text=raw_text, engine=engine, source=source)
     elif plan["op"] == "update":
         cid = plan["candidate_id"]
@@ -330,17 +369,23 @@ def process_candidates(cands: list[dict], confidence: float, engine: str, raw_te
     if conflicts:
         meta["cross_check"] = conflicts
     for c in cands:
-        plan = plan_change(c)
-        extra = conflicts.get(c["name"], [])
-        if plan["op"] != "noop" and (low_conf or plan["reasons"] or extra):
-            reasons = plan["reasons"] + extra + ([f"AI 置信度 {confidence:.2f} 低于阈值 {settings.confidence_threshold}"]
-                                                 if low_conf else [])
-            to_confirm.append({**plan, "reasons": reasons})
-            continue
-        cand = apply_plan(plan, operator=operator, raw_text=raw_text, engine=engine, source=source)
+        with WRITE_LOCK:  # 查找 + 写入原子化，防止并发录入同一新人时重复建档
+            plan = plan_change(c)
+            owner = (db.get_candidate(plan["candidate_id"]) or {}).get("hr_owner") if plan.get("candidate_id") else None
+            if owner and owner != operator:
+                plan["notes"].append(f"该候选人由 {owner} 负责，注意避免重复跟进")
+            extra = conflicts.get(c["name"], [])
+            if plan["op"] != "noop" and (low_conf or plan["reasons"] or extra):
+                reasons = plan["reasons"] + extra + ([f"AI 置信度 {confidence:.2f} 低于阈值 {settings.confidence_threshold}"]
+                                                     if low_conf else [])
+                to_confirm.append({**plan, "reasons": reasons})
+                continue
+            cand = apply_plan(plan, operator=operator, raw_text=raw_text, engine=engine, source=source)
         icon = {"create": "🆕 已建档", "update": "✅ 已更新", "noop": "ℹ️"}[plan["op"]]
         lines.append(f"{icon}　{describe_plan(plan)}")
-        actions.append({"type": plan["op"], "candidate": public_candidate(cand), "changes": plan["changes"]})
+        lines += [f"　· {n}" for n in plan.get("notes", [])]
+        actions.append({"type": plan["op"], "candidate": public_candidate(cand), "changes": plan["changes"],
+                        "notes": plan.get("notes", [])})
 
     pending_id = None
     applied_text = "\n".join(lines)
@@ -350,6 +395,7 @@ def process_candidates(cands: list[dict], confidence: float, engine: str, raw_te
                                     {"plans": to_confirm, "engine": engine}, reasons)
         for p in to_confirm:
             lines.append(f"⚠️ 待确认　{describe_plan(p)}")
+            lines += [f"　· {n}" for n in p.get("notes", [])]
         lines.append("原因：" + "；".join(reasons))
         lines.append("回复「确认」写入，回复「取消」放弃。")
         actions.append({"type": "pending", "pending_id": pending_id, "plans": to_confirm, "reasons": reasons})
@@ -371,12 +417,13 @@ def resolve_pending(pid: int, confirm: bool, operator: str, return_payload: bool
     else:
         lines, actions = [], []
         for plan in p["proposal"]["plans"]:
-            if plan["op"] == "update":  # 确认时重新计算差异，防止期间数据已被修改
-                fresh = plan_change({"name": plan["name"], **plan["fields"]})
-                if fresh["op"] == "update" and fresh.get("candidate_id") == plan["candidate_id"]:
-                    plan = fresh
-            cand = apply_plan(plan, operator=operator, raw_text=p["raw_text"],
-                              engine=p["proposal"].get("engine", ""), source=p["source"])
+            with WRITE_LOCK:
+                if plan["op"] == "update":  # 确认时重新计算差异，防止期间数据已被修改
+                    fresh = plan_change({"name": plan["name"], **plan["fields"]})
+                    if fresh["op"] == "update" and fresh.get("candidate_id") == plan["candidate_id"]:
+                        plan = fresh
+                cand = apply_plan(plan, operator=operator, raw_text=p["raw_text"],
+                                  engine=p["proposal"].get("engine", ""), source=p["source"])
             lines.append(f"✅ 已确认写入　{describe_plan(plan)}")
             actions.append({"type": plan["op"], "candidate": public_candidate(cand), "changes": plan["changes"]})
         db.close_pending(pid, "confirmed")

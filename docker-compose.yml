@@ -1,4 +1,22 @@
+# 本机 / 单机部署：应用 + MySQL 8.4。先在 .env 里设置 MYSQL_PASSWORD，然后：docker compose up -d --build
 services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: recruit
+      MYSQL_USER: recruit
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?请在 .env 中设置 MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD:?请在 .env 中设置 MYSQL_PASSWORD}
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_bin"]
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
   recruit-ai:
     build: .
     image: recruit-ai:latest
@@ -7,6 +25,15 @@ services:
     env_file:
       - path: .env
         required: false
+    environment:
+      # 容器内通过服务名 mysql 访问数据库（覆盖 .env 里可能存在的本机地址）
+      DATABASE_URL: mysql://recruit:${MYSQL_PASSWORD}@mysql:3306/recruit
+    depends_on:
+      mysql:
+        condition: service_healthy
     volumes:
       - ./data:/app/data
     restart: unless-stopped
+
+volumes:
+  mysql_data:

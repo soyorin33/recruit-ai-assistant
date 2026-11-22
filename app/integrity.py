@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import json
 
-from .db import DB
+from .db import DB, TABLES
 from .domain import STAGES, STATUSES
 
 
@@ -17,8 +17,10 @@ def check(db: DB) -> dict[str, list]:
         "非法状态": [c["name"] for c in cands if c["status"] not in STATUSES],
         "已入职但阶段不一致": [c["name"] for c in cands if (c["status"] == "已入职") != (c["stage"] == "已入职")],
         "更新时间早于建档时间": [c["name"] for c in cands if c["updated_at"] < c["created_at"]],
-        "同手机号多人": [r["phone"] for r in db.q(
-            "SELECT phone FROM candidates WHERE phone IS NOT NULL AND phone<>'' GROUP BY phone HAVING COUNT(*)>1")],
+        # 同一个人可以投多个岗位（手机号相同、岗位不同是合法的）；同手机号 + 同岗位才是重复建档
+        "同手机号同岗位重复": [f"{r['phone']}·{r['position']}" for r in db.q(
+            "SELECT phone, position FROM candidates WHERE phone IS NOT NULL AND phone<>'' "
+            "GROUP BY phone, position HAVING COUNT(*)>1")],
         "孤儿事件": [r["id"] for r in db.q("SELECT id FROM events WHERE candidate_id NOT IN (SELECT id FROM candidates)")],
         "孤儿同步映射": [r["candidate_id"] for r in db.q(
             "SELECT candidate_id FROM sync_map WHERE candidate_id NOT IN (SELECT id FROM candidates) UNION ALL "
@@ -46,11 +48,20 @@ def check(db: DB) -> dict[str, list]:
 
 
 def summary(db: DB) -> dict:
-    integrity = db.one("PRAGMA integrity_check")
+    if db.dialect == "mysql":
+        version = db.one("SELECT VERSION() AS v")["v"]
+        checks = db.q("CHECK TABLE " + ", ".join(TABLES))
+        integrity = "ok" if all(r.get("Msg_text") == "OK" for r in checks) else \
+            "；".join(f"{r.get('Table')}: {r.get('Msg_text')}" for r in checks if r.get("Msg_text") != "OK")
+        backend, mode = f"MySQL {version}", "InnoDB"
+    else:
+        row = db.one("PRAGMA integrity_check")
+        integrity = list(row.values())[0] if row else None
+        backend, mode = "SQLite", list(db.one("PRAGMA journal_mode").values())[0]
     return {
-        "sqlite_integrity": list(integrity.values())[0] if integrity else None,
-        "journal_mode": list(db.one("PRAGMA journal_mode").values())[0],
-        "tables": {t: db.one(f"SELECT COUNT(*) n FROM {t}")["n"]
-                   for t in ("candidates", "events", "pending", "messages", "sync_map", "tdocs_map")},
-        "indexes": sorted(r["name"] for r in db.q("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_%'")),
+        "backend": backend,
+        "integrity": integrity,
+        "mode": mode,  # SQLite 为日志模式（wal），MySQL 为存储引擎
+        "tables": {t: db.one(f"SELECT COUNT(*) n FROM {t}")["n"] for t in TABLES},
+        "indexes": db.index_names(),
     }

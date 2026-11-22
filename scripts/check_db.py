@@ -1,4 +1,7 @@
-"""数据库一致性检查（只读）。用法：python -m scripts.check_db [数据库路径]"""
+"""数据库一致性检查（只读）。用法：python -m scripts.check_db [数据库路径或 mysql:// 连接串]
+
+不带参数时检查当前配置的数据库（DATABASE_URL，未设置则为 SQLite 文件 DB_PATH）。
+"""
 from __future__ import annotations
 
 import sys
@@ -12,13 +15,15 @@ from app.integrity import check, summary  # noqa: E402
 
 
 def main() -> None:
-    path = sys.argv[1] if len(sys.argv) > 1 else settings.db_path
-    if not Path(path).exists():
-        sys.exit(f"数据库不存在：{path}")
-    db = DB(path)
+    target = sys.argv[1] if len(sys.argv) > 1 else (settings.database_url or settings.db_path)
+    is_mysql = target.startswith("mysql")
+    if not is_mysql and not Path(target).exists():
+        sys.exit(f"数据库不存在：{target}")
+    db = DB(target)
     s = summary(db)
-    print(f"数据库：{path}")
-    print(f"SQLite 完整性：{s['sqlite_integrity']}｜日志模式：{s['journal_mode']}")
+    shown = target.split("@")[-1] if is_mysql else target  # 不打印账号密码
+    print(f"数据库：{s['backend']}（{shown}）")
+    print(f"完整性：{s['integrity']}｜{'存储引擎' if is_mysql else '日志模式'}：{s['mode']}")
     print("表行数：" + "，".join(f"{k} {v}" for k, v in s["tables"].items()))
     print("索引：" + "、".join(s["indexes"]))
     issues = check(db)

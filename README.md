@@ -37,11 +37,13 @@ uvicorn app.main:app --port 8000
 其他常用命令：
 
 ```bash
-python -m pytest -q                   # 114 项测试，含智能体、企微端到端、群 @ 机器人（回调 + 长连接）、腾讯文档 MCP、截图识别、访问控制、数据一致性
+python -m pytest -q                   # 124 项测试，含智能体、企微端到端、群 @ 机器人（回调 + 长连接）、腾讯文档 MCP、去重与并发、截图识别、访问控制、数据一致性
+TEST_DATABASE_URL=mysql://用户:密码@127.0.0.1:3306/recruit_test python -m pytest -q   # 同一套测试在 MySQL 上跑
 python -m eval.run_eval --engine both # 抽取准确率评测：规则引擎 vs 大模型（需要 Key）
 python -m eval.agent_scenarios        # 智能体多轮对话场景测试（需要 Key）
 python -m scripts.doctor              # 接入自检：逐项检查模型 / 企微 / 表格 / 群机器人
-python -m scripts.check_db            # 数据库一致性检查：枚举、时间顺序、重复、流水回放
+python -m scripts.check_db            # 数据库一致性检查：枚举、时间顺序、重复、流水回放（MySQL / SQLite 均可）
+python -m scripts.migrate_to_mysql    # 把 SQLite 数据原样迁移到 MySQL（保留编号，行数逐表核对）
 ```
 
 ## 二、演示脚本（建议按顺序点左下角的示例）
@@ -78,7 +80,7 @@ flowchart TB
     B6{置信度 ≥ 阈值<br/>且无风险?}
   end
   subgraph 数据["存储与同步"]
-    C1[(SQLite<br/>候选人 + 事件流水)]
+    C1[(MySQL<br/>候选人 + 事件流水)]
     C2[腾讯文档智能表格<br/>官方 MCP · HR 日常查看]
   end
   subgraph 输出["输出层"]
@@ -104,7 +106,7 @@ flowchart TB
    - **降级**：模型不可用时自动切换到规则引擎，规则引擎同样能处理「他 / 她 / 这个人」这类指代。
 1. **AI 理解，代码计算**：大模型只负责「理解消息 / 理解问题 / 组织语言」，所有统计数字都由代码查询得出，从机制上杜绝模型编造数据（见 `app/nlq.py`）。
 2. **结构化输出 + 防越界**：Prompt 中给出字段规范、枚举、口语映射规则（如「一面过了」表示进入复试）和 Few-shot 示例；输出经过白名单、枚举和时间格式校验，非法值直接丢弃（见 `app/extractor.py`）。
-3. **人在回路**：以下情况不自动写入，而是转为确认卡片：置信度低于阈值、阶段回退或跳级、已淘汰后重新激活、同名但岗位不同。在企微里回复「确认」或「取消」即可处理（见 `app/pipeline.py`）。
+3. **人在回路**：以下情况不自动写入，而是转为确认卡片：置信度低于阈值、阶段回退或跳级、已淘汰后重新激活、同名但岗位不同、同一人（手机号相同）投了新岗位、要修改已有记录的应聘岗位。在企微里回复「确认」或「取消」即可处理（见 `app/pipeline.py`）。
 4. **可追溯**：每次变更都记录事件流水（变更前后的值、操作人、原始消息、AI 引擎），出了问题能查清楚是谁、在什么时候、因为哪句话改的。
 5. **高可用降级**：没有配置 Key、模型超时或返回异常时，自动降级到规则引擎，业务不中断，界面上也会提示已降级。
 6. **模型无关**：使用 OpenAI 兼容协议，切换 DeepSeek、混元、通义只需改两个环境变量。
@@ -118,6 +120,12 @@ flowchart TB
 14. **群 @ 助手 · URL 回调**（`app/wecom/aibot.py`）：对接企微智能机器人 API 模式的 URL 回调方式，收发都是加密 JSON，ReceiveId 为空字符串。回复用流式消息：先回「正在处理」，企微随后带着同一个流 ID 回来拉取进度，最后拿到结果。规则模式下几毫秒就能处理完，最多等 1.5 秒，完成了就直接给出最终结果。图片和文件按官方方案用 AES 解密；重复推送的消息按 msgid 只处理一次。
 15. **群 @ 助手 · 长连接**（`app/wecom/aibot_ws.py`，推荐）：服务器主动用 WebSocket 连到企微，只需 Bot ID + Secret，**不需要公网域名、HTTPS 和备案**。已用个人注册的企业微信实测跑通：消息 → DeepSeek 处理入库 → 企微内回复 → 看板实时刷新。招聘助手还会**主动推送**（`aibot_send_msg`）：在哪个群被 @ 过就记住哪个群，每天把跟进提醒和日报发过去，群里发「关闭推送 / 开启推送」可切换；Webhook 群机器人只在它不可用时兜底。企微账号 ID 可通过 `WECOM_USER_NAMES` 显示为中文名。协议对照官方 Node SDK 实现：认证、30 秒心跳（连续 2 次无回执即重连）、同一 `req_id` 的流式回复串行发送并等待回执、断线指数退避重连、按每条消息独立的 aeskey 解密文件。同一个机器人只能有一条长连接，被别处挤掉后暂停 5 分钟再连，避免两个实例互踢。消息处理逻辑与 URL 回调方式共用。
 16. **腾讯文档总表**（`app/tdocs.py`）：后端作为 MCP 客户端调用腾讯文档官方 MCP 服务（Streamable HTTP + JSON-RPC），把候选人总表写进 HR 自己的腾讯文档智能表格：「当前阶段」「状态」是单选列，可直接在腾讯文档里分组、建看板视图。`scripts/tdocs_setup.py` 一键建表；首次启动自动全量写入，之后每次变更更新同一行；与企微智能表格共用一个多目标同步队列，各自独立重试、独立记录行 ID。
+17. **去重与并发**（`pipeline.plan_change`、`app/db.py`）：一条记录 = 一个人应聘一个岗位。
+   - **同一人**：先按手机号匹配，再按姓名 + 岗位匹配；手机号相同但岗位不同，视为**又投了新岗位**，确认后新增一条应聘记录，原记录不动。
+   - **多渠道**：渠道以**首次投递**为准，后来的渠道只提示不覆盖，保证渠道效果统计准确。
+   - **多位 HR**：其他 HR 录入或更新时，提示「该候选人由谁负责」，避免重复跟进。
+   - **同时录入**：「查找 → 新建」在进程内加锁串行执行；数据库再加唯一约束（手机号 + 岗位）兜底，即使多进程部署也不会重复建档，命中约束时自动回退为已有记录。
+   - **为什么用 MySQL**：生产部署默认 MySQL 8.4（InnoDB、utf8mb4_bin 区分大小写，便于后续多实例、备份、接 BI）；本机零配置体验和单元测试可用 SQLite。业务代码只写标准 SQL，方言差异都收敛在 `db.py`，CI 把同一套测试在两种数据库上各跑一遍。
 
 ## 四、AI 效果评测
 
@@ -162,14 +170,15 @@ DeepSeek 唯一的错误是把「蒋欣offer已经发了，下周一入职」判
 ## 六、部署
 
 ```bash
-docker compose up -d --build        # 或：docker build -t recruit-ai . && docker run -d -p 8000:8000 --env-file .env -v $(pwd)/data:/app/data recruit-ai
+docker compose up -d --build        # 应用 + MySQL 8.4（先在 .env 中设置 MYSQL_PASSWORD）
+# 只想快速体验：docker build -t recruit-ai . && docker run -d -p 8000:8000 --env-file .env recruit-ai（不设 DATABASE_URL 时用 SQLite）
 # 国内服务器构建时可以用镜像源加速：
 docker build --build-arg PIP_INDEX_URL=https://mirrors.cloud.tencent.com/pypi/simple -t recruit-ai .
 ```
 
 > ⚠️ **部署到公网时必须设置 `ACCESS_TOKEN`**（看板里有候选人的个人信息），正式使用还要设置 `SEED_DEMO_DATA=0`（不生成演示数据，并禁止重置）。给面试官的在线预览可以保留演示数据，把口令和链接一起提供。
 
-镜像已经实测：构建后约 320MB，启动后 `/healthz` 健康检查通过（状态为 healthy），页面、消息处理和看板接口均正常。数据库挂载在 `./data`，重建容器不会丢数据。
+CI 每次推送都会用 docker compose 启动「应用 + MySQL」并做健康检查和数据一致性检查。MySQL 数据保存在 Docker 卷 `mysql_data` 中，重建容器不会丢数据。
 
 **一键部署到云服务器**（`deploy/`）：应用 + Caddy（自动申请 HTTPS 证书），默认用免费的 `<IP>.sslip.io` 域名，无需购买域名、无需备案（香港等境外地域）。
 
@@ -177,7 +186,7 @@ docker build --build-arg PIP_INDEX_URL=https://mirrors.cloud.tencent.com/pypi/si
 deploy/deploy.sh <服务器IP> [SSH 用户]   # 同步代码、复制 .env、构建并启动；访问口令首次部署时在服务器上随机生成
 ```
 
-- 腾讯云 / 阿里云轻量应用服务器（2 核 2G 即可）都可以运行，单进程 SQLite 足以支撑单个团队使用。
+- 腾讯云 / 阿里云轻量应用服务器（2 核 2G 即可）都可以运行；部署脚本会一起启动 MySQL 8.4（InnoDB 缓冲池限制为 128M，适配小内存），数据库密码首次部署时在服务器上随机生成。
 - 智能机器人长连接、群机器人推送、腾讯文档同步都是服务器主动访问外网，不依赖域名；只有自建应用回调和 URL 回调方式的机器人需要与企业主体一致的域名。
 - 长连接要求程序一直在线，所以选择常驻的服务器，而不是会休眠的免费托管平台。
 
@@ -202,6 +211,7 @@ app/
   jd.py           简历 × 岗位要求匹配打分（大模型 + 规则兜底）
   vision.py       截图识别（视觉模型）
   auth.py         访问控制：口令登录、签名会话、失败限流
+  db.py           数据层：MySQL / SQLite 双后端（方言差异全部收敛在这里），唯一约束「手机号 + 岗位」
   integrity.py    数据一致性检查（被 scripts/check_db.py 和测试复用）
   pipeline.py     核心流水线：路由（智能体 / 规则）→ 去重 → 状态机 → 写入 / 确认 → 同步
   extractor.py    AI 抽取（LLM Prompt + 规则兜底）、简历解析、时间换算
@@ -218,10 +228,10 @@ app/
   domain.py       阶段 / 状态 / 岗位 / 渠道 词典
   db.py, seed.py  数据层、演示数据
 static/           前端演示台（原生 JS + ECharts，无需构建）
-tests/            114 项测试：抽取、流水线、问数、简历、智能体（模拟大模型服务器）、企微端到端（模拟企微服务器）、群 @ 机器人（模拟企微 WebSocket 服务器）、腾讯文档（模拟 MCP 服务器）、截图识别、岗位匹配、交叉校验、访问控制、数据一致性
+tests/            124 项测试（CI 中 SQLite、MySQL 各跑一遍）：抽取、流水线、问数、简历、智能体（模拟大模型服务器）、企微端到端（模拟企微服务器）、群 @ 机器人（模拟企微 WebSocket 服务器）、腾讯文档（模拟 MCP 服务器）、截图识别、岗位匹配、交叉校验、访问控制、数据一致性
 .github/          CI：每次推送自动跑测试、评测、数据一致性检查，并构建 Docker 镜像做健康检查
 eval/             agent_scenarios.py 智能体多轮场景测试；抽取准确率评测集（34 条标注样本）与评测脚本、评测报告
-scripts/          doctor.py 接入自检；check_db.py 数据库一致性检查；tdocs_setup.py 一键创建腾讯文档总表
+scripts/          doctor.py 接入自检；check_db.py 数据库一致性检查；tdocs_setup.py 一键创建腾讯文档总表；migrate_to_mysql.py SQLite → MySQL 迁移
 deploy/           云服务器部署：docker-compose（应用 + Caddy 自动 HTTPS）、一键部署脚本
 docs/             真实环境接入手册
 ```
@@ -230,4 +240,4 @@ docs/             真实环境接入手册
 
 - **P1**：面试官直接在群里回复评价并自动关联到候选人；面试日程自动生成企微日程；腾讯文档总表双向同步（HR 在表格里改了，也能回写到系统）。
 - **P2**：渠道 ROI 分析（结合渠道费用）；把待同步任务存进数据库并加定时对账；记录模型调用的耗时和费用。
-- **P3**：招聘周期预测与风险预警（如 Offer 拒签概率）；多团队权限隔离，数据库换成 MySQL。
+- **P3**：招聘周期预测与风险预警（如 Offer 拒签概率）；多团队权限隔离（按团队分库或加 tenant 字段）；候选人表拆分为「人」和「应聘记录」两张表。

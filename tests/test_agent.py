@@ -261,3 +261,21 @@ def test_data_question_answered_from_memory_is_caught(fake):
     msg = send("张三现在什么情况？")
     tools = [s["tool"] for s in msg["payload"]["agent"]["steps"]]
     assert tools == ["guard", "get_candidate"] and msg["text"] == "张三：复试·进行中。"
+
+
+def test_rule_notes_reach_the_model(fake):
+    """系统规则带来的提示（渠道以首次投递为准）必须出现在工具结果里交给模型，避免模型自己编原因。"""
+    fake.script = [tool_call("record_candidates", {"updates": [ZHANG], "confidence": 0.95}), reply("已建档。")]
+    send("张三 Java后端 BOSS来的，一面过了，25号下午3点二面，面试官陈晨")
+    cid = db.find_by_name("张三")[0]["id"]
+
+    def check_tool_result(body):
+        res = json.loads(body["messages"][-1]["content"])["results"][0]
+        assert res["result"] == "无变化" and any("渠道以首次投递为准" in n and "BOSS直聘" in n for n in res["notes"])
+        assert "如实转述" in body["messages"][0]["content"]
+        return reply("渠道以首次投递为准，张三的渠道保留 BOSS直聘。")
+
+    fake.script = [tool_call("record_candidates", {"updates": [
+        {"candidate_id": cid, "name": "张三", "channel": "猎聘"}], "confidence": 0.9}), check_tool_result]
+    send("张三 猎聘上也投了")
+    assert db.get_candidate(cid)["channel"] == "BOSS直聘"
