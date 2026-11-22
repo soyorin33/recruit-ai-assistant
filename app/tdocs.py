@@ -23,10 +23,16 @@ from .domain import STAGES, STATUSES, mask_phone
 
 log = logging.getLogger("tdocs")
 PROTOCOL_VERSION = "2025-03-26"
+# 个人版与企业版（saas.docs.qq.com）的 MCP 地址不同，Token 也不通用；建表脚本会自动探测
+ENDPOINTS = {
+    "个人版": "https://docs.qq.com/openapi/mcp",
+    "企业版": "https://saas.docs.qq.com/api/v6/open/agent/mcp",
+}
 
 ERROR_HINTS = {
     "400006": "Token 鉴权失败：请重新生成 TDOCS_TOKEN",
-    "400007": "腾讯文档 VIP 权限不足：该操作需要腾讯文档会员",
+    "400007": "腾讯文档 VIP 权限不足或调用次数已用完（个人版需会员，企业版需升级专业版）",
+    "400014": "腾讯文档企业版：该操作需要升级专业版",
     "400008": "腾讯文档积分不足",
 }
 
@@ -152,6 +158,13 @@ class MCPClient:
             raise TDocsError(_hint(f"{name} 调用失败：{detail}"))
         return data if isinstance(data, dict) else {"result": data}
 
+    def create_args(self, name: str, title: str, kind: str = "smartsheet") -> dict:
+        """按服务端 Schema 组装 create_file 参数：个人版用 file_type="smartsheet"，企业版用 type=9。"""
+        props = (self.tools.get(self.resolve(name), {}).get("inputSchema") or {}).get("properties") or {}
+        if "type" in props and "file_type" not in props:
+            return {"title": title, "type": {"smartsheet": 9}[kind]}
+        return {"title": title, "file_type": kind}
+
     def list_tools(self) -> list[str]:
         with self._lock:
             self._ensure()
@@ -160,6 +173,21 @@ class MCPClient:
 
 class _SessionExpired(Exception):
     pass
+
+
+def detect_endpoint(token: str, preferred: str | None = None) -> tuple[str, str]:
+    """依次尝试配置的地址、个人版、企业版，返回 (地址, 名称)。只调用 tools/list，不改任何文档。"""
+    tried, errors = [], []
+    for name, url in ([("配置", preferred)] if preferred else []) + list(ENDPOINTS.items()):
+        if url in tried:
+            continue
+        tried.append(url)
+        try:
+            MCPClient(url, token, timeout=20).list_tools()
+            return url, next((n for n, u in ENDPOINTS.items() if u == url), name)
+        except TDocsError as e:
+            errors.append(f"{url}：{e}")
+    raise TDocsError("Token 在个人版和企业版都无法使用：" + "；".join(errors))
 
 
 # ======================= 智能表格：候选人总表 =======================
@@ -183,7 +211,7 @@ def field_specs() -> list[dict]:
         elif ftype == "number":
             spec["property_number"] = {"decimal_places": 0}
         elif ftype == "singleSelect":
-            spec["property_single_select"] = {"options": [{"text": o, "style": i % 10 + 1}
+            spec["property_single_select"] = {"options": [{"text": o, "style": i % 8 + 1}
                                                           for i, o in enumerate(OPTIONS[key])]}
         specs.append(spec)
     return specs

@@ -10,12 +10,15 @@
   同一 req_id 的回复要串行发送：发一条、等回执、再发下一条
 - 没有 cmd 的帧是回执：{"headers": {"req_id"}, "errcode", "errmsg"}，按 req_id 前缀区分认证 / 心跳 / 回复
 - 图片 / 文件给的是 URL + 每条消息独立的 aeskey（AES-256-CBC，IV 取密钥前 16 字节）
+- 主动推送 {"cmd": "aibot_send_msg", "body": {"chatid", "msgtype": "markdown", "markdown": {"content"}}}：
+  日报 / 跟进提醒由招聘助手自己发到群里，群里只需要一个机器人
 - 同一个机器人只能保持一条长连接：别处建立新连接时，旧连接会收到 disconnected_event，此时暂停 5 分钟再重连
 """
 from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import time
 import uuid
@@ -36,10 +39,22 @@ CMD_RESPOND = "aibot_respond_msg"
 CMD_WELCOME = "aibot_respond_welcome_msg"
 CMD_CALLBACK = "aibot_msg_callback"
 CMD_EVENT = "aibot_event_callback"
+CMD_SEND = "aibot_send_msg"  # 主动推送：向群（chatid）或单聊（userid）发 markdown，不依赖回调
 PROGRESS_INTERVAL = 0.8  # 进度刷新的最小间隔（秒），避免刷屏和触发频控
 KICK_RETRY = 300  # 被别处的新连接踢下线后，等 5 分钟再重连（避免两个实例互踢，也避免一次误操作让服务永久离线）
 
 status = {"enabled": False, "state": "未启用", "connected_at": None, "last_error": None, "received": 0}
+PUSH_ON_RE = re.compile(r"^(开启|打开|订阅)(日报)?(推送|提醒)$")
+PUSH_OFF_RE = re.compile(r"^(关闭|取消|停止)(日报)?(推送|提醒)$")
+
+
+def truncate_bytes(text: str, limit: int = 4000) -> str:
+    """企微 markdown 消息按 UTF-8 字节限长（约 4096），超长时截断并提示。"""
+    raw = text.encode()
+    if len(raw) <= limit:
+        return text
+    suffix = "\n\n……（内容较长，完整版见看板）"
+    return raw[:limit - len(suffix.encode())].decode(errors="ignore").rstrip() + suffix
 
 
 class AuthError(Exception):
@@ -193,7 +208,8 @@ class AibotWS:
         return ack
 
     def _stream(self, rid: str, sid: str, content: str, finish: bool) -> None:
-        self.reply(rid, {"msgtype": "stream", "stream": {"id": sid, "finish": finish, "content": content[:20000]}})
+        self.reply(rid, {"msgtype": "stream", "stream": {"id": sid, "finish": finish,
+                                                         "content": aibot.clean_markdown(content)[:20000]}})
 
     # ---------- 业务 ----------
     def _on_message(self, rid: str, body: dict) -> None:
@@ -204,10 +220,20 @@ class AibotWS:
         while len(self._seen) > 1000:
             self._seen.popitem(last=False)
 
+        chatid, chattype = self._remember_chat(body)
         kind, body = aibot.prepare(body)
         if kind == "ignore":
             return
         sid = uuid.uuid4().hex
+        text = aibot.extract_text(body) if kind == "process" else ""
+        if chatid and (PUSH_ON_RE.match(text) or PUSH_OFF_RE.match(text)):
+            on = bool(PUSH_ON_RE.match(text))
+            from ..db import db
+            db.set_push_enabled(chatid, chattype, on)
+            where = "这个群" if chattype == "group" else "你"
+            self._stream(rid, sid, (f"✅ 已开启：每天 {settings.alert_time} 跟进提醒、{settings.report_time} 招聘日报会推送给{where}。"
+                                    if on else f"已关闭：不再给{where}推送日报和提醒。发「开启推送」可恢复。"), True)
+            return
         try:
             if kind == "help":
                 self._stream(rid, sid, pipeline.HELP_TEXT, True)
@@ -228,6 +254,30 @@ class AibotWS:
             self._stream(rid, sid, final, True)
         except Exception:  # noqa: BLE001
             log.exception("最终结果发送失败")
+
+    @staticmethod
+    def _remember_chat(body: dict) -> tuple[str | None, str]:
+        """群里被 @ 过就记住这个群（作为日报推送目标）；单聊记住用户但默认不推送。"""
+        chattype = body.get("chattype") or "single"
+        chatid = body.get("chatid") if chattype == "group" else (body.get("from") or {}).get("userid")
+        if chatid:
+            try:
+                from ..db import db
+                if db.touch_push_chat(chatid, chattype, auto_enable=chattype == "group"):
+                    log.info("记住新的%s：%s", "群聊" if chattype == "group" else "单聊", chatid[:12])
+            except Exception:  # noqa: BLE001
+                log.exception("记录推送目标失败")
+        return chatid, chattype
+
+    def send_markdown(self, chatid: str, content: str) -> None:
+        """主动推送一条 markdown 到群 / 单聊，等待回执；失败抛异常。"""
+        ack = self.reply(req_id(CMD_SEND), {"chatid": chatid, "msgtype": "markdown",
+                                            "markdown": {"content": truncate_bytes(aibot.clean_markdown(content))}},
+                         CMD_SEND)
+        if ack is None:
+            raise TimeoutError("主动推送无回执")
+        if ack.get("errcode", 0) != 0:
+            raise RuntimeError(f"主动推送被拒绝：errcode={ack.get('errcode')} {ack.get('errmsg')}")
 
     def _on_event(self, rid: str, body: dict) -> None:
         etype = (body.get("event") or {}).get("eventtype")
@@ -265,6 +315,28 @@ def start() -> None:
         return
     client = AibotWS(settings.wecom_aibot_id, settings.wecom_aibot_secret, settings.wecom_aibot_ws_url)
     client.start()
+
+
+def connected() -> bool:
+    return bool(client and client.ws is not None and status["state"] == "已连接")
+
+
+def push_markdown(content: str) -> dict:
+    """把日报 / 提醒推送到所有开启推送的会话。返回 {sent, failed, errors}。"""
+    from ..db import db
+    chats = db.push_chats()
+    result = {"sent": 0, "failed": 0, "errors": [], "targets": len(chats)}
+    if not chats or not connected():
+        return result
+    for c in chats:
+        try:
+            client.send_markdown(c["chatid"], content)
+            result["sent"] += 1
+        except Exception as e:  # noqa: BLE001
+            result["failed"] += 1
+            result["errors"].append(str(e)[:120])
+            log.warning("推送到 %s 失败：%s", c["chatid"][:12], e)
+    return result
 
 
 def stop() -> None:

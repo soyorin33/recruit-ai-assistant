@@ -68,9 +68,29 @@
   const stageColor = (s) => css(`--st${Math.max(0, STAGES.indexOf(s))}`);
 
   /* ======================= 状态栏 ======================= */
+  function pushChip(st) {
+    const p = st.push, last = p.last || {};
+    const times = `每天 ${p.alert_time} 跟进提醒、${p.report_time} 日报`;
+    let on, label, title;
+    if (st.aibot_ws.enabled && p.chats > 0) {
+      on = st.aibot_ws.state === "已连接";
+      label = `日报推送：招聘助手 → ${p.chats} 个群`;
+      title = `${times}，由招聘助手主动推送` + (p.webhook ? "；Webhook 群机器人作为备用" : "");
+    } else if (st.aibot_ws.enabled) {
+      on = false; label = p.webhook ? "日报推送：Webhook" : "日报推送：待绑定群";
+      title = "在企微群里 @招聘助手 说一句话，这个群就会收到每日日报和跟进提醒";
+    } else {
+      on = p.webhook; label = p.webhook ? "日报推送：Webhook" : "日报推送：未配置";
+      title = `${times}推送到企微群`;
+    }
+    if (last.error) title += `\n上次推送：${last.error}`;
+    else if (last.at) title += `\n上次推送：${last.at}，经${last.via}`;
+    return chip(on, label, title);
+  }
+
   function tdocsChip(t) {
-    const label = !t.enabled ? "腾讯文档：未配置" : t.last_error ? "腾讯文档：同步异常" : `腾讯文档：已同步 ${t.synced}`;
-    const title = t.last_error || (t.enabled ? "候选人变更实时写入腾讯文档智能表格（官方 MCP），点击打开" : "配置 TDOCS_TOKEN 并运行 scripts.tdocs_setup 后启用");
+    const label = !t.enabled ? "腾讯文档：未配置" : t.last_error ? "腾讯文档：同步异常" : "腾讯文档：已接入";
+    const title = t.last_error || (t.enabled ? `候选人变更实时写入腾讯文档智能表格（官方 MCP），本次启动以来已同步 ${t.synced} 次，点击打开表格` : "配置 TDOCS_TOKEN 并运行 scripts.tdocs_setup 后启用");
     const inner = [h("span", { class: "dot" + (t.enabled && !t.last_error ? " on" : "") }), label];
     return t.enabled && t.url
       ? h("a", { class: "chip", title, href: t.url, target: "_blank", rel: "noopener" }, ...inner)
@@ -87,7 +107,7 @@
         st.llm.enabled ? st.llm.base_url : "未配置 LLM_API_KEY，自动降级为本地规则引擎；配置后即切换为大模型"),
       chip(st.wecom_app, st.wecom_app ? "企微应用：已接入" : "企微应用：未接入", "接收 HR 在企业微信中发给招聘助手的消息"),
       chip(st.smartsheet.enabled, st.smartsheet.enabled ? `智能表格：已同步 ${st.smartsheet.synced}` : "智能表格：未配置", st.smartsheet.last_error || "候选人变更自动写入企微智能表格"),
-      chip(st.webhook, st.webhook ? "群机器人：已接入" : "群机器人：未配置", "日报 / 预警推送到企微群"),
+      pushChip(st),
       tdocsChip(st.tdocs),
       st.aibot_ws.enabled
         ? chip(st.aibot_ws.state === "已连接", `群 @ 助手：${st.aibot_ws.state}`,
@@ -535,7 +555,7 @@
       showTyping(true);
       const r = await api("/api/report", { method: "POST" }).catch((e) => toast(e.message));
       showTyping(false);
-      if (r) toast(r.pushed ? "日报已生成并推送到企微群" : "日报已生成（配置群机器人后可自动推送）");
+      if (r) toast(r.pushed ? "日报已生成，并已推送到企微群" : "日报已生成（在企微群里 @招聘助手 一次，之后即可自动推送到该群）");
       refreshAll();
     };
     $("btn-reset").onclick = async () => {
@@ -551,7 +571,7 @@
     };
     $("btn-push-alerts").onclick = async () => {
       const r = await api("/api/alerts/push", { method: "POST" }).catch((e) => toast(e.message));
-      if (r) toast(r.pushed ? "提醒已推送到企微群" : r.markdown ? "未配置群机器人，提醒内容已生成" : "当前没有需要提醒的事项");
+      if (r) toast(r.pushed ? "提醒已推送到企微群" : r.markdown ? "提醒内容已生成（招聘助手还没绑定群，暂未推送）" : "当前没有需要提醒的事项");
     };
     document.querySelectorAll(".tab").forEach((t) => (t.onclick = () => {
       document.querySelectorAll(".tab").forEach((x) => x.classList.toggle("active", x === t));

@@ -17,7 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.config import BASE_DIR, settings  # noqa: E402
-from app.tdocs import COLUMNS, MCPClient, TDocsError, field_specs  # noqa: E402
+from app.tdocs import COLUMNS, MCPClient, TDocsError, detect_endpoint, field_specs  # noqa: E402
 
 TITLE = "招聘候选人总表"
 
@@ -26,8 +26,19 @@ def setup(c: MCPClient, file_id: str | None = None, title: str = TITLE) -> dict:
     notes: list[str] = []
     created, url = False, None
     if not file_id:
-        r = c.call("manage.create_file", {"title": title, "file_type": "smartsheet"})
-        file_id, url, created = r["file_id"], r.get("url"), True
+        c.list_tools()
+        r = c.call("manage.create_file", c.create_args("manage.create_file", title))
+        file_id = r.get("file_id") or r.get("id") or (r.get("file") or {}).get("file_id")
+        if not file_id:
+            raise TDocsError(f"create_file 没有返回 file_id：{str(r)[:200]}")
+        url, created = r.get("url") or (r.get("file") or {}).get("url"), True
+        if not url:  # 企业版 create_file 不返回链接，从文件信息里取
+            try:
+                info = c.call("manage.query_file_info", {"file_id": file_id})
+                f = info.get("file") or info
+                url = f.get("doc_url") or f.get("url")
+            except TDocsError:
+                pass
     sheets = c.call("smartsheet.list_tables", {"file_id": file_id}).get("sheets") or []
     if not sheets:
         raise TDocsError("这个智能表格里没有工作表")
@@ -76,8 +87,10 @@ def main() -> None:
     args = ap.parse_args()
     if not settings.tdocs_token:
         sys.exit("请先在 .env 里填写 TDOCS_TOKEN（腾讯文档 MCP 个人 Token）")
-    c = MCPClient(settings.tdocs_mcp_url, settings.tdocs_token)
     try:
+        url, edition = detect_endpoint(settings.tdocs_token, settings.tdocs_mcp_url)
+        print(f"✅ Token 可用：腾讯文档{edition}（{url}）")
+        c = MCPClient(url, settings.tdocs_token)
         if args.tools:
             tools = c.list_tools()
             print(f"腾讯文档 MCP 共提供 {len(tools)} 个工具：")
@@ -94,7 +107,7 @@ def main() -> None:
     for n in res["notes"]:
         print("   ⚠️", n)
     if not args.no_write:
-        updates = {"TDOCS_FILE_ID": res["file_id"], "TDOCS_SHEET_ID": res["sheet_id"]}
+        updates = {"TDOCS_MCP_URL": url, "TDOCS_FILE_ID": res["file_id"], "TDOCS_SHEET_ID": res["sheet_id"]}
         if res["url"]:
             updates["TDOCS_URL"] = res["url"]
         write_env(BASE_DIR / ".env", updates)

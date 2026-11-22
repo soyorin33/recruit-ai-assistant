@@ -200,3 +200,93 @@ def test_kicked_by_new_connection_pauses_reconnecting(wecom):
     assert _wait(lambda: aibot_ws.status["state"] == "已被新连接替换")
     time.sleep(1.5)
     assert wecom.conns == 1 and c.kicked
+
+
+def _sent(fake):
+    with fake.lock:
+        return [f for f in fake.frames if f.get("cmd") == "aibot_send_msg"]
+
+
+def test_assistant_pushes_daily_report_to_groups(wecom):
+    """招聘助手自己推送日报：群里被 @ 过就记住该群，日报 / 提醒由它主动发到群里，不需要 Webhook。"""
+    from app import report
+    from app.db import db
+    from app.wecom import aibot_ws
+    c = wecom.connect()
+    aibot_ws.client = c
+    assert _wait(lambda: aibot_ws.status["state"] == "已连接")
+    gid = "wr_push_group_1"
+    wecom.push(_msg("req_p1", "msg_p1", {"chatid": gid, "msgtype": "text", "text": {"content": "@招聘助手 王芳什么情况"}}))
+    assert _wait(lambda: _finished(wecom, "req_p1"))
+    assert gid in {x["chatid"] for x in db.push_chats()}
+    # 单聊只记住，不自动推送
+    wecom.push(_msg("req_p2", "msg_p2", {"chattype": "single", "chatid": None, "from": {"userid": "hr_solo"},
+                                         "msgtype": "text", "text": {"content": "王芳什么情况"}}))
+    assert _wait(lambda: _finished(wecom, "req_p2"))
+    assert "hr_solo" not in {x["chatid"] for x in db.push_chats()}
+
+    before = len(_sent(wecom))
+    assert report.push("## 今日招聘日报\n测试内容" + "很长" * 3000)
+    frames = _sent(wecom)[before:]
+    targets = {f["body"]["chatid"] for f in frames}
+    assert gid in targets and "hr_solo" not in targets
+    f = next(x for x in frames if x["body"]["chatid"] == gid)
+    assert f["body"]["msgtype"] == "markdown" and f["body"]["markdown"]["content"].startswith("## 今日招聘日报")
+    assert len(f["body"]["markdown"]["content"].encode()) <= 4000  # 按字节截断
+    assert report.last_push["via"] == "招聘助手" and report.last_push["error"] is None
+
+    # 在群里发「关闭推送」→ 该群不再收到；「开启推送」恢复
+    wecom.push(_msg("req_p3", "msg_p3", {"chatid": gid, "msgtype": "text", "text": {"content": "@招聘助手 关闭推送"}}))
+    assert _wait(lambda: _finished(wecom, "req_p3"))
+    assert "已关闭" in wecom.replies("req_p3")[-1]["body"]["stream"]["content"]
+    assert gid not in {x["chatid"] for x in db.push_chats()}
+    wecom.push(_msg("req_p4", "msg_p4", {"chatid": gid, "msgtype": "text", "text": {"content": "@招聘助手 开启推送"}}))
+    assert _wait(lambda: _finished(wecom, "req_p4"))
+    assert "已开启" in wecom.replies("req_p4")[-1]["body"]["stream"]["content"]
+    assert gid in {x["chatid"] for x in db.push_chats()}
+    aibot_ws.client = None
+
+
+def test_push_falls_back_to_webhook_when_assistant_offline(monkeypatch):
+    from app import report
+    from app.config import settings
+    from app.wecom import aibot_ws, api
+    monkeypatch.setattr(aibot_ws, "connected", lambda: False)
+    sent = []
+    monkeypatch.setattr(api, "webhook_markdown", lambda md: sent.append(md))
+    monkeypatch.setattr(settings, "wecom_webhook_url", "http://example.invalid/hook")
+    assert report.push("日报") and sent == ["日报"]
+    assert report.last_push["via"] == "Webhook 群机器人"
+    monkeypatch.setattr(settings, "wecom_webhook_url", "")
+    assert not report.push("日报") and "未配置推送" in report.last_push["error"]
+
+
+def test_clean_markdown_for_assistant():
+    from app.wecom.aibot import clean_markdown
+    md = ('> 在途候选人 <font color="info">19</font> 人\n**<font color="warning">需跟进</font>**\n'
+          '<font color="comment">今日 AI 自动记录 0 条</font>')
+    out = clean_markdown(md)
+    assert "<font" not in out and "</font>" not in out
+    assert "**19**" in out and "**需跟进**" in out and "****" not in out
+    assert "今日 AI 自动记录 0 条" in out and "**今日" not in out
+
+
+def test_userid_shown_as_chinese_name(wecom, monkeypatch):
+    from app.config import settings
+    from app.db import db
+    from app.wecom import aibot_ws
+    monkeypatch.setattr(settings, "wecom_user_names", {"hr_li": "李小红"})
+    wecom.connect()
+    assert _wait(lambda: aibot_ws.status["state"] == "已连接")
+    wecom.push(_msg("req_n", "msg_n", {"msgtype": "text", "text": {"content": "@招聘助手 苏明远 前端开发 拉勾来的 一面过了"}}))
+    assert _wait(lambda: _finished(wecom, "req_n"))
+    assert db.find_by_name("苏明远")[0]["hr_owner"] == "李小红"
+    assert db.q("SELECT operator FROM messages WHERE text LIKE '%苏明远 前端开发%'")[0]["operator"] == "李小红"
+
+
+def test_user_names_setting_parsing(monkeypatch):
+    from app.config import display_name, parse_user_names, settings
+    assert parse_user_names("ZhouJiaXing=周家兴， lisi = 李四,bad,=x") == {"ZhouJiaXing": "周家兴", "lisi": "李四"}
+    assert parse_user_names("") == {}
+    monkeypatch.setattr(settings, "wecom_user_names", {"lisi": "李四"})
+    assert display_name("lisi") == "李四" and display_name("other") == "other" and display_name(None) == ""

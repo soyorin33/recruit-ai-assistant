@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import analytics, auth, bus, pipeline, report, sync
-from .config import BASE_DIR, now, settings
+from .config import BASE_DIR, display_name, now, settings
 from .db import db
 from .domain import FIELD_LABELS
 from .seed import seed
@@ -36,6 +36,19 @@ async def lifespan(_app: FastAPI):
     aibot_ws.stop()
 
 
+def _apply_user_names() -> None:
+    """配置了 WECOM_USER_NAMES 后，把历史记录里的企微账号 ID 换成中文名（并同步到腾讯文档）。"""
+    for uid, name in settings.wecom_user_names.items():
+        ids = [r["id"] for r in db.q("SELECT id FROM candidates WHERE hr_owner=?", (uid,))]
+        if ids:
+            db.exec("UPDATE candidates SET hr_owner=? WHERE hr_owner=?", (name, uid))
+            for cid in ids:
+                sync.enqueue(cid)
+        db.exec("UPDATE messages SET operator=? WHERE operator=?", (name, uid))
+        if ids:
+            log.info("负责HR：%s → %s（%s 名候选人）", uid, name, len(ids))
+
+
 async def _startup() -> asyncio.Task:
     if settings.seed_demo_data and not db.one("SELECT id FROM candidates LIMIT 1"):
         seed(db, pipeline.HELP_TEXT)
@@ -43,6 +56,7 @@ async def _startup() -> asyncio.Task:
     if not db.one("SELECT id FROM messages LIMIT 1"):  # 正式环境首次启动也给出使用说明
         db.add_message("bot", pipeline.HELP_TEXT, operator="招聘助手", payload={"kind": "chat"})
     sync.start()
+    _apply_user_names()  # 在同步队列启动后执行，改名才会同步到腾讯文档
     from .wecom import aibot_ws
     aibot_ws.start()  # 智能机器人长连接（配置了 WECOM_AIBOT_ID / SECRET 时）
     task = asyncio.create_task(_scheduler())
@@ -165,6 +179,8 @@ def status() -> dict:
         "wecom_app": settings.wecom_app_enabled,
         "smartsheet": {**sync.status, "enabled": settings.smartsheet_enabled},
         "webhook": settings.webhook_enabled,
+        "push": {"chats": len(db.push_chats()), "webhook": settings.webhook_enabled,
+                 "report_time": settings.report_time, "alert_time": settings.alert_time, "last": report.last_push},
         "aibot": settings.aibot_enabled or settings.aibot_ws_enabled,
         "aibot_ws": _aibot_ws_status(),
         "tdocs": {**sync.statuses["tdocs"], "enabled": settings.tdocs_enabled, "url": settings.tdocs_url or None},
@@ -398,7 +414,7 @@ async def wecom_receive(request: Request, background: BackgroundTasks, msg_signa
     if mid in _seen_msg_ids:  # 企微超时会重试推送，按 MsgId 幂等去重
         return PlainTextResponse("")
     _seen_msg_ids.append(mid)
-    user, mtype = msg.get("FromUserName", ""), msg.get("MsgType")
+    user, mtype = display_name(msg.get("FromUserName", "")), msg.get("MsgType")
     if mtype == "text" and msg.get("Content", "").strip():
         background.add_task(_wecom_text, user, msg["Content"].strip())
     elif mtype in ("file", "image") and msg.get("MediaId"):

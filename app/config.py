@@ -23,6 +23,12 @@ def _env(key: str, default: str = "") -> str:
     return os.getenv(key, default).strip()
 
 
+def parse_user_names(raw: str) -> dict[str, str]:
+    """「ZhouJiaXing=周家兴,lisi=李四」→ {账号: 中文名}，兼容中文逗号和多余空格。"""
+    pairs = (item.partition("=") for item in raw.replace("，", ",").split(","))
+    return {k.strip(): v.strip() for k, _, v in pairs if k.strip() and v.strip()}
+
+
 class Settings:
     # ---- 大模型（任意 OpenAI 兼容接口：DeepSeek / 混元 / 通义 / Kimi ...）----
     llm_api_key = _env("LLM_API_KEY")
@@ -50,6 +56,10 @@ class Settings:
     wecom_aibot_id = _env("WECOM_AIBOT_ID")
     wecom_aibot_secret = _env("WECOM_AIBOT_SECRET")
     wecom_aibot_ws_url = _env("WECOM_AIBOT_WS_URL", "wss://openws.work.weixin.qq.com")
+
+    # ---- 企微账号 → 中文名（「负责HR」、消息发送人显示用）----
+    # 格式：WECOM_USER_NAMES=ZhouJiaXing=周家兴,lisi=李四（企微后台「通讯录」里成员的「账号」一栏）
+    wecom_user_names = parse_user_names(_env("WECOM_USER_NAMES"))
 
     # ---- 企微群机器人 Webhook（推送日报 / 预警）----
     wecom_webhook_url = _env("WECOM_WEBHOOK_URL")
@@ -124,3 +134,10 @@ class Settings:
 
 
 settings = Settings()
+
+
+def display_name(userid: str | None) -> str:
+    """企微账号 ID → 中文名（未配置时原样返回）。"""
+    if not userid:
+        return ""
+    return settings.wecom_user_names.get(userid, userid)

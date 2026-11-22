@@ -77,7 +77,7 @@ def crypt() -> WXBizMsgCrypt:
 def stream_reply(sid: str, nonce: str) -> dict:
     st = store.get(sid) or {"content": "这条消息已过期，请重新发送。", "finish": True}
     return crypt().encrypt_json({"msgtype": "stream", "stream": {
-        "id": sid, "finish": st["finish"], "content": st["content"][:20000]}}, nonce)
+        "id": sid, "finish": st["finish"], "content": clean_markdown(st["content"])[:20000]}}, nonce)
 
 
 def _download(item: dict) -> bytes:
@@ -91,7 +91,8 @@ def run(data: dict, progress, download) -> str:
 
     download(item) 负责下载并解密 data["image"] / data["file"]，返回明文字节。
     """
-    user = (data.get("from") or {}).get("userid") or "group-user"
+    from ..config import display_name
+    user = display_name((data.get("from") or {}).get("userid")) or "group-user"
     mtype = data.get("msgtype")
     if mtype == "image":
         msg = pipeline.handle_image("群聊图片.png", download(data["image"]), operator=user,
@@ -130,6 +131,13 @@ def _process(sid: str, data: dict) -> None:
     except Exception as e:
         log.exception("智能机器人消息处理失败")
         store.update(sid, f"处理失败：{e}", finish=True)
+
+
+def clean_markdown(text: str) -> str:
+    """智能机器人消息不支持群机器人 Webhook 的 <font color> 彩色文字：comment（灰色）去掉标签，其余改为加粗。"""
+    text = re.sub(r'<font color="comment">(.*?)</font>', r"\1", text, flags=re.S)
+    text = re.sub(r"<font[^>]*>(.*?)</font>", r"**\1**", text, flags=re.S)
+    return text.replace("****", "**")
 
 
 def extract_text(data: dict) -> str:

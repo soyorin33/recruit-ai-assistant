@@ -108,13 +108,34 @@ def build_alerts() -> str | None:
     return "\n".join(md)
 
 
+last_push: dict = {"at": None, "via": None, "sent": 0, "error": None}
+
+
 def push(markdown: str) -> bool:
-    if not settings.webhook_enabled:
-        return False
-    from .wecom import api
-    try:
-        api.webhook_markdown(markdown)
-        return True
-    except Exception as e:
-        log.warning("推送企微群失败：%s", e)
-        return False
+    """推送日报 / 提醒到企微群。
+
+    优先由「招聘助手」（智能机器人长连接）主动推送到它被 @ 过的群，群里只需要一个机器人；
+    招聘助手不可用（未连接 / 还没被拉进群 / 推送失败）且配置了 Webhook 群机器人时，用 Webhook 兜底。
+    """
+    from .wecom import aibot_ws
+    sent, via, error = 0, None, None
+    if aibot_ws.connected():
+        r = aibot_ws.push_markdown(markdown)
+        sent, via = r["sent"], "招聘助手"
+        if r["failed"]:
+            error = "；".join(r["errors"])[:200]
+        elif not r["targets"]:
+            error = "招聘助手还没被拉进任何群（在群里 @ 它一次即可）"
+    if not sent and settings.webhook_enabled:
+        from .wecom import api
+        try:
+            api.webhook_markdown(markdown)
+            sent, via, error = 1, "Webhook 群机器人", None
+        except Exception as e:  # noqa: BLE001
+            error = f"群机器人推送失败：{e}"[:200]
+    if not sent and not error and not settings.webhook_enabled:
+        error = "未配置推送：招聘助手未连接，也没有 Webhook"
+    last_push.update(at=ts(), via=via if sent else None, sent=sent, error=error)
+    if error:
+        log.warning("推送企微群：%s", error)
+    return sent > 0

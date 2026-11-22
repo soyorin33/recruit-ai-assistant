@@ -60,6 +60,13 @@ CREATE TABLE IF NOT EXISTS sync_map (
     candidate_id INTEGER PRIMARY KEY,
     record_id TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS push_chats (
+    chatid TEXT PRIMARY KEY,           -- 群聊 chatid；单聊为成员 userid
+    chattype TEXT NOT NULL DEFAULT 'group',
+    enabled INTEGER NOT NULL DEFAULT 1, -- 在群里发「关闭推送」/「开启推送」切换
+    first_seen TEXT NOT NULL,
+    last_seen TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS tdocs_map (
     candidate_id INTEGER PRIMARY KEY,
     record_id TEXT NOT NULL
@@ -212,6 +219,24 @@ class DB:
     def set_record_id(self, cid: int, record_id: str, target: str = "wecom") -> None:
         self.exec(f"INSERT OR REPLACE INTO {self.MAP_TABLES[target]} (candidate_id, record_id) VALUES (?,?)",
                   (cid, record_id))
+
+    # 日报 / 提醒的推送目标：招聘助手被 @ 过的群（不随演示数据重置而清空）
+    def touch_push_chat(self, chatid: str, chattype: str = "group", auto_enable: bool = True) -> bool:
+        """记录会话；返回是否为新会话。新群默认开启推送，单聊默认不推送（需发「开启推送」）。"""
+        now_ = ts()
+        if self.one("SELECT chatid FROM push_chats WHERE chatid=?", (chatid,)):
+            self.exec("UPDATE push_chats SET last_seen=? WHERE chatid=?", (now_, chatid))
+            return False
+        self.exec("INSERT INTO push_chats (chatid, chattype, enabled, first_seen, last_seen) VALUES (?,?,?,?,?)",
+                  (chatid, chattype, int(auto_enable), now_, now_))
+        return True
+
+    def set_push_enabled(self, chatid: str, chattype: str, enabled: bool) -> None:
+        self.touch_push_chat(chatid, chattype, auto_enable=enabled)
+        self.exec("UPDATE push_chats SET enabled=? WHERE chatid=?", (int(enabled), chatid))
+
+    def push_chats(self) -> list[dict]:
+        return self.q("SELECT * FROM push_chats WHERE enabled=1 ORDER BY first_seen")
 
     def clear_record_ids(self, target: str) -> None:
         self.exec(f"DELETE FROM {self.MAP_TABLES[target]}")
