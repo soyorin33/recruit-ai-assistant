@@ -14,10 +14,10 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Red
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import analytics, auth, bus, pipeline, report, sync
+from . import analytics, auth, bus, manual, pipeline, report, sync
 from .config import BASE_DIR, display_name, now, settings
 from .db import db
-from .domain import FIELD_LABELS
+from .domain import CHANNELS, FIELD_LABELS, POSITIONS, STAGES, STATUSES
 from .seed import seed
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -155,6 +155,19 @@ class PendingIn(BaseModel):
     operator: str = "HR小王"
 
 
+class ManualIn(BaseModel):
+    """手动录入 / 编辑：fields 为字段名 → 值（空字符串表示清空）；force=True 表示已看过风险提示仍要保存。"""
+    fields: dict
+    operator: str = "HR小王"
+    force: bool = False
+    failure_id: int | None = None
+
+
+class FailureIn(BaseModel):
+    operator: str = "HR小王"
+    note: str = ""
+
+
 @app.get("/")
 def index() -> FileResponse:
     return FileResponse(STATIC / "index.html")
@@ -187,6 +200,7 @@ def status() -> dict:
         "vision": {"enabled": settings.vision_enabled, "model": settings.vision_model or None},
         "confidence_threshold": settings.confidence_threshold,
         "stale_days": settings.stale_days,
+        "failures_open": db.one("SELECT COUNT(*) n FROM failures WHERE state='open'")["n"],
         "auth_enabled": settings.auth_enabled,
         "demo_mode": settings.demo_mode,
         "report_time": settings.report_time,
@@ -216,6 +230,48 @@ def candidate(cid: int) -> dict:
     if not c:
         raise HTTPException(404, "候选人不存在")
     return {"candidate": pipeline.public_candidate(c), "events": db.events_for(cid)}
+
+
+# ======================= 人工兜底：手动录入 / 编辑、待人工处理 =======================
+@app.get("/api/meta")
+def meta() -> dict:
+    return {"stages": STAGES, "statuses": STATUSES, "positions": POSITIONS, "channels": CHANNELS,
+            "labels": FIELD_LABELS}
+
+
+def _manual(call):
+    try:
+        return call()
+    except manual.ManualError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@app.post("/api/candidates")
+def manual_create(body: ManualIn) -> dict:
+    return _manual(lambda: manual.save(body.fields, operator=body.operator, force=body.force,
+                                       failure_id=body.failure_id))
+
+
+@app.patch("/api/candidates/{cid}")
+def manual_update(cid: int, body: ManualIn) -> dict:
+    return _manual(lambda: manual.save(body.fields, operator=body.operator, candidate_id=cid, force=body.force,
+                                       failure_id=body.failure_id))
+
+
+@app.get("/api/failures")
+def failures() -> dict:
+    return {"items": manual.list_open()}
+
+
+@app.post("/api/failures/{fid}/retry")
+def failure_retry(fid: int, body: FailureIn) -> dict:
+    return _manual(lambda: manual.retry(fid, body.operator))
+
+
+@app.post("/api/failures/{fid}/resolve")
+def failure_resolve(fid: int, body: FailureIn) -> dict:
+    manual.resolve(fid, body.operator, body.note)
+    return {"ok": True}
 
 
 @app.get("/api/messages")

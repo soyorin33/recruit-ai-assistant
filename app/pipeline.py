@@ -253,6 +253,22 @@ def _focus_of(payload: dict) -> list[int]:
 
 
 # ---------------- 消息入口 ----------------
+MANUAL_TAIL = "\n\n🙋 已转人工：原始内容已保存到看板「待人工处理」，可以在网页上重试或手动录入，不会丢失。"
+
+
+def _to_manual(payload: dict, kind: str, raw_text: str, source: str, operator: str) -> dict:
+    """系统没能自动处理时：把原始内容放进「待人工处理」队列，并在回复里明确告诉 HR。"""
+    from . import manual
+    fid = manual.record(kind, raw_text=raw_text, error=payload.get("error") or payload.get("text", ""),
+                        source=source, operator=operator)
+    payload["failure_id"] = fid
+    payload["text"] = payload["text"] + MANUAL_TAIL
+    for k in ("web_text",):
+        if payload.get(k):
+            payload[k] += MANUAL_TAIL
+    return payload
+
+
 def handle_message(text: str, operator: str = "HR", source: str = "web", progress=None) -> dict:
     """处理一条 HR 消息，返回机器人回复消息（已入库并推送）。
 
@@ -268,9 +284,13 @@ def handle_message(text: str, operator: str = "HR", source: str = "web", progres
             progress(t)
     try:
         payload = _route(text, operator, source, history, focus, notify)
-    except Exception as e:  # 兜底：任何异常都要给 HR 明确反馈，而不是沉默
+    except Exception as e:  # 兜底：任何异常都要给 HR 明确反馈，并转人工，而不是沉默或丢消息
         log.exception("处理消息失败")
-        payload = {"kind": "error", "text": f"处理失败：{e}，请稍后重试或换个说法。"}
+        payload = {"kind": "error", "text": f"⚠️ 处理出错：{e}", "error": f"{type(e).__name__}: {e}"}
+    if payload.get("kind") == "error":
+        _to_manual(payload, "message", text, source, operator)
+    elif payload.pop("unrecognized", False):
+        _to_manual(payload, "unrecognized", text, source, operator)
     payload["to"] = operator
     payload.setdefault("focus", _focus_of(payload))
     msg = db.add_message("bot", payload.pop("text"), operator="招聘助手", source=source, payload=payload)
@@ -328,7 +348,10 @@ def _dispatch(text: str, operator: str, source: str, focus: list[int] | None = N
         tail = "\n\n（已同步推送到企微群）" if pushed else ""
         return {"kind": "report", "text": rep["text"] + tail, "report": rep, "extraction": meta}
 
-    if intent != "update" or not ex["candidates"]:
+    if intent == "update" and not ex["candidates"]:  # 像是在说招聘进展，但没识别出是谁 → 转人工，不能丢
+        return {"kind": "chat", "text": "没能识别出这条消息说的是哪位候选人（缺少姓名？）。\n\n" + HELP_TEXT,
+                "extraction": meta, "unrecognized": True, "error": "未识别到候选人姓名"}
+    if intent != "update":
         return {"kind": "chat", "text": HELP_TEXT, "extraction": meta}
 
     return process_candidates(ex["candidates"], ex["confidence"], ex["engine"], text, operator, source, meta)
@@ -496,6 +519,8 @@ def handle_resume(filename: str, content: bytes, operator: str = "HR", source: s
     except Exception as e:
         log.exception("简历处理失败")
         payload = {"kind": "error", "text": f"简历处理失败：{e}"}
+    if payload.get("kind") == "error":
+        _to_manual(payload, "resume", f"[简历文件] {filename}", source, operator)
     msg = db.add_message("bot", payload.pop("text"), operator="招聘助手", source=source, payload=payload)
     bus.publish("message", {})
     return msg
@@ -516,6 +541,8 @@ def handle_image(filename: str, content: bytes, operator: str = "HR", source: st
     except Exception as e:
         log.exception("截图处理失败")
         payload = {"kind": "error", "text": f"截图处理失败：{e}"}
+    if payload.get("kind") == "error":
+        _to_manual(payload, "image", f"[截图] {filename}", source, operator)
     payload["to"] = operator
     payload.setdefault("focus", _focus_of(payload))
     msg = db.add_message("bot", payload.pop("text"), operator="招聘助手", source=source, payload=payload)

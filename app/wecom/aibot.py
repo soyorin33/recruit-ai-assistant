@@ -130,7 +130,7 @@ def _process(sid: str, data: dict) -> None:
         store.update(sid, run(data, lambda t: store.update(sid, t), _download), finish=True)
     except Exception as e:
         log.exception("智能机器人消息处理失败")
-        store.update(sid, f"处理失败：{e}", finish=True)
+        store.update(sid, f"⚠️ 处理出错：{e}" + _manual_record(data, e), finish=True)
 
 
 def clean_markdown(text: str) -> str:
@@ -138,6 +138,17 @@ def clean_markdown(text: str) -> str:
     text = re.sub(r'<font color="comment">(.*?)</font>', r"\1", text, flags=re.S)
     text = re.sub(r"<font[^>]*>(.*?)</font>", r"**\1**", text, flags=re.S)
     return text.replace("****", "**")
+
+
+def _manual_record(data: dict, err: Exception) -> str:
+    """企微侧处理失败（如文件下载 / 解密失败）：转人工并返回给 HR 的提示。"""
+    from .. import manual
+    from ..config import display_name
+    from ..pipeline import MANUAL_TAIL
+    raw = extract_text(data) or f"[{data.get('msgtype')}] 企微{'文件' if data.get('msgtype') == 'file' else '消息'}"
+    manual.record("wecom", raw_text=raw, error=f"{type(err).__name__}: {err}", source="wecom_group",
+                  operator=display_name((data.get("from") or {}).get("userid")))
+    return MANUAL_TAIL
 
 
 def extract_text(data: dict) -> str:

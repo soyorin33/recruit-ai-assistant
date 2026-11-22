@@ -249,7 +249,7 @@ class AibotWS:
             final = aibot.run(body, progress, download)
         except Exception as e:  # noqa: BLE001
             log.exception("智能机器人消息处理失败")
-            final = f"处理失败：{e}"
+            final = f"⚠️ 处理出错：{e}" + aibot._manual_record(body, e)
         try:
             self._stream(rid, sid, final, True)
         except Exception:  # noqa: BLE001

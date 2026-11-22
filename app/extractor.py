@@ -339,7 +339,9 @@ def rules_extract_message(text: str, known: list[dict]) -> dict:
     if re.search(QUERY_RE, t):
         return {**base, "intent": "query", "confidence": 0.85}
     if not names:
-        return {**base, "intent": "chat", "confidence": 0.5}
+        # 有招聘进展的说法却找不到姓名（如「今天面的那个小伙子一面过了」）：标记为 update 但没有候选人，
+        # 流水线会转人工处理，而不是当成闲聊丢掉
+        return {**base, "intent": "update" if has_update_words else "chat", "confidence": 0.5}
 
     cands = []
     for idx, (pos, name) in enumerate(names):

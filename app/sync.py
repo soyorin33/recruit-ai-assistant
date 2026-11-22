@@ -64,8 +64,11 @@ def _worker(name: str, q: queue.Queue) -> None:
             st["last_error"] = str(e)[:200]
             if attempt < 3:
                 threading.Timer(2 ** attempt, q.put, args=((cid, attempt + 1),)).start()
-            else:
+            else:  # 重试 3 次仍失败 → 转人工（看板「待人工处理」可一键重试）
                 st["failed"] += 1
+                from . import manual
+                manual.record("sync", raw_text=f"{target['label']}：{cand['name']}（编号 {cid}）",
+                              error=str(e), source="sync", ref_id=cid)
         bus.publish("sync", {})
         time.sleep(0.2)  # 简单限速，避免触发接口频率限制
 
@@ -79,6 +82,14 @@ def start() -> None:
     # 腾讯文档首次接入（映射为空）时自动全量写入，部署后表格里马上就有数据
     if "tdocs" in _queues and not db.one("SELECT candidate_id FROM tdocs_map LIMIT 1"):
         full_sync()
+
+
+def retry(candidate_id: int) -> bool:
+    """手动重试同步某位候选人（来自「待人工处理」）。"""
+    if not _queues:
+        return False
+    enqueue(candidate_id)
+    return True
 
 
 def full_sync() -> int:

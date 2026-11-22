@@ -81,6 +81,17 @@ CREATE TABLE IF NOT EXISTS tdocs_map (
     candidate_id INTEGER PRIMARY KEY,
     record_id TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS failures (      -- 待人工处理：系统没能自动处理的消息 / 文件 / 同步
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    kind TEXT NOT NULL,                     -- message / unrecognized / resume / image / sync
+    source TEXT, operator TEXT,
+    raw_text TEXT, error TEXT,
+    ref_id INTEGER,                         -- 同步失败时为候选人编号
+    state TEXT NOT NULL DEFAULT 'open',     -- open / resolved
+    resolved_by TEXT, resolved_at TEXT, note TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_failures_state ON failures(state, id);
 """
 
 # MySQL：建索引 / 主键的文本列必须是 VARCHAR；排序规则用 utf8mb4_bin（区分大小写，与 SQLite 一致——
@@ -135,9 +146,20 @@ MYSQL_SCHEMA = [
         first_seen VARCHAR(19) NOT NULL, last_seen VARCHAR(19) NOT NULL
     ) {_T}""",
     f"CREATE TABLE IF NOT EXISTS tdocs_map (candidate_id INT PRIMARY KEY, record_id VARCHAR(128) NOT NULL) {_T}",
+    f"""CREATE TABLE IF NOT EXISTS failures (
+        id INT PRIMARY KEY AUTO_INCREMENT,
+        ts VARCHAR(19) NOT NULL,
+        kind VARCHAR(32) NOT NULL,
+        source VARCHAR(32), operator VARCHAR(100),
+        raw_text MEDIUMTEXT, error TEXT,
+        ref_id INT,
+        state VARCHAR(16) NOT NULL DEFAULT 'open',
+        resolved_by VARCHAR(100), resolved_at VARCHAR(19), note TEXT,
+        KEY idx_failures_state (state, id)
+    ) {_T}""",
 ]
-TABLES = ("candidates", "events", "pending", "messages", "sync_map", "push_chats", "tdocs_map")
-RESET_TABLES = ("candidates", "events", "pending", "messages", "sync_map", "tdocs_map")  # 推送目标群不随演示重置清空
+TABLES = ("candidates", "events", "pending", "messages", "sync_map", "push_chats", "tdocs_map", "failures")
+RESET_TABLES = ("candidates", "events", "pending", "messages", "sync_map", "tdocs_map", "failures")  # 推送目标群不随演示重置清空
 
 TS_FMT = "%Y-%m-%d %H:%M:%S"
 
@@ -405,6 +427,28 @@ class DB:
 
     def push_chats(self) -> list[dict]:
         return self.q("SELECT * FROM push_chats WHERE enabled=1 ORDER BY first_seen")
+
+    # ---------- 待人工处理 ----------
+    def add_failure(self, kind: str, *, raw_text: str = "", error: str = "", source: str = "", operator: str = "",
+                    ref_id: int | None = None) -> int:
+        # 同一条同步失败只保留一条未处理记录，避免反复失败刷屏
+        if ref_id is not None:
+            row = self.one("SELECT id FROM failures WHERE kind=? AND ref_id=? AND state='open'", (kind, ref_id))
+            if row:
+                self.exec("UPDATE failures SET ts=?, error=? WHERE id=?", (ts(), error[:1000], row["id"]))
+                return row["id"]
+        return self.exec("INSERT INTO failures (ts, kind, source, operator, raw_text, error, ref_id) VALUES (?,?,?,?,?,?,?)",
+                         (ts(), kind, source, operator, raw_text[:5000], error[:1000], ref_id))
+
+    def get_failure(self, fid: int) -> dict | None:
+        return self.one("SELECT * FROM failures WHERE id=?", (fid,))
+
+    def list_failures(self, state: str = "open", limit: int = 100) -> list[dict]:
+        return self.q("SELECT * FROM failures WHERE state=? ORDER BY id DESC LIMIT ?", (state, limit))
+
+    def resolve_failure(self, fid: int, operator: str, note: str = "") -> None:
+        self.exec("UPDATE failures SET state='resolved', resolved_by=?, resolved_at=?, note=? WHERE id=? AND state='open'",
+                  (operator, ts(), note[:500], fid))
 
     def clear_record_ids(self, target: str) -> None:
         self.exec(f"DELETE FROM {self.MAP_TABLES[target]}")

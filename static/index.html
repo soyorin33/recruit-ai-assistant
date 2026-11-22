@@ -21,6 +21,7 @@
   <div class="chips" id="chips"></div>
   <div class="actions">
     <button class="btn primary" id="btn-report">📊 生成日报</button>
+    <button class="btn" id="btn-manual" title="系统出问题或想直接改数据时，在这里手动录入">＋ 手动录入</button>
     <a class="btn" href="/api/export.csv">⬇ 导出表格</a>
     <button class="btn hidden" id="btn-reset" title="恢复为初始演示数据">↺ 重置演示</button>
     <button class="btn hidden" id="btn-logout">退出</button>
@@ -56,6 +57,7 @@
       <button class="tab active" data-tab="dash">数据看板</button>
       <button class="tab" data-tab="table">候选人总表 <span class="chip tnum" id="cand-count" style="padding:0 7px"></span></button>
       <button class="tab" data-tab="alerts">跟进提醒 <span class="badge-n tnum hidden" id="alert-count"></span></button>
+      <button class="tab" data-tab="manual">待人工处理 <span class="badge-n tnum hidden" id="failure-count"></span></button>
     </nav>
 
     <div class="tab-body" id="tab-dash">
@@ -112,6 +114,14 @@
         <button class="btn sm" id="btn-push-alerts" style="margin-left:auto">推送提醒到企微群</button>
       </div>
       <div id="alerts"></div>
+    </div>
+
+    <div class="tab-body hidden" id="tab-manual">
+      <div class="toolbar">
+        <span style="color:var(--text-3);font-size:13px">系统没能自动处理的内容都会留在这里，不会丢失：可以重试、手动录入，或标记已处理</span>
+        <button class="btn sm" id="btn-manual-2" style="margin-left:auto">＋ 手动录入</button>
+      </div>
+      <div id="failures"></div>
     </div>
   </section>
 </div>

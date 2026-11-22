@@ -68,6 +68,8 @@
   const stageColor = (s) => css(`--st${Math.max(0, STAGES.indexOf(s))}`);
 
   /* ======================= 状态栏 ======================= */
+  const chip = (on, label, title) => h("span", { class: "chip", title }, h("span", { class: "dot" + (on ? " on" : "") }), label);
+
   function pushChip(st) {
     const p = st.push, last = p.last || {};
     const times = `每天 ${p.alert_time} 跟进提醒、${p.report_time} 日报`;
@@ -100,7 +102,6 @@
   async function loadStatus() {
     S.status = await api("/api/status");
     const st = S.status;
-    const chip = (on, label, title) => h("span", { class: "chip", title }, h("span", { class: "dot" + (on ? " on" : "") }), label);
     $("chips").replaceChildren(
       h("span", { class: "chip", title: "Server-Sent Events 实时推送" }, h("span", { class: "dot live", id: "live-dot" }), "实时同步"),
       chip(true, st.llm.enabled ? `AI 引擎：${st.llm.model}` : "AI 引擎：规则引擎（演示模式）",
@@ -479,16 +480,124 @@
       h("div", { class: "drawer-mask", onclick: close }),
       h("aside", { class: "drawer", role: "dialog", "aria-label": `${c.name} 详情` },
         h("div", { class: "drawer-head" }, h("h2", {}, c.name), h("span", { class: `status s-${c.status}` }, c.status),
-          h("button", { class: "btn sm", style: "margin-left:auto", onclick: close }, "关闭")),
+          h("button", { class: "btn sm", style: "margin-left:auto", onclick: () => { close(); openForm({ candidate: c }); } }, "✏️ 编辑"),
+          h("button", { class: "btn sm", onclick: close }, "关闭")),
         h("div", { class: "drawer-body" },
           h("dl", { class: "kv" }, ...kv.flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, v)])),
           matchSection(c),
           h("h3", { style: "font-size:14px;margin:0 0 10px" }, "变更记录（可追溯到原始消息）"),
           h("div", { class: "timeline" }, ...events.map((e) => h("div", { class: "tl-item" },
-            h("div", { class: "tl-time tnum" }, `${e.ts.slice(5, 16)} · ${e.operator || ""} · ${{ llm: "大模型", agent: "智能体", vision: "截图识别", rules: "规则引擎" }[e.engine] || "系统"}${e.source === "wecom" ? " · 企业微信" : ""}`),
+            h("div", { class: "tl-time tnum" }, `${e.ts.slice(5, 16)} · ${e.operator || ""} · ${{ llm: "大模型", agent: "智能体", vision: "截图识别", rules: "规则引擎", manual: "✍️ 手动录入" }[e.engine] || "系统"}${e.source === "wecom" || e.source === "wecom_group" ? " · 企业微信" : ""}`),
             h("div", {}, e.action === "create" ? "建档" : Object.entries(e.changes).filter(([k]) => LBL[k]).map(([k, [o, n]]) => `${LBL[k]}：${o ? o + " → " : ""}${n ?? "清空"}`).join("；")),
             e.raw_text ? h("div", { class: "tl-raw" }, "💬 ", e.raw_text) : null)))))
     );
+  }
+
+  /* ======================= 人工兜底：手动录入 / 编辑 ======================= */
+  const FORM_FIELDS = [
+    ["name", "姓名", "text", true], ["phone", "手机", "tel"], ["position", "应聘岗位", "list:positions"],
+    ["channel", "渠道", "list:channels"], ["stage", "当前阶段", "select:stages"], ["status", "状态", "select:statuses"],
+    ["interviewer", "面试官", "text"], ["interview_time", "面试时间", "datetime-local"], ["email", "邮箱", "email"],
+    ["hr_owner", "负责HR", "text"], ["feedback", "面试评价", "textarea"], ["resume_summary", "简历摘要", "textarea"],
+  ];
+
+  async function openForm({ candidate = null, failure = null } = {}) {
+    S.meta = S.meta || await api("/api/meta");
+    const editing = !!candidate;
+    const close = () => $("drawer-root").replaceChildren();
+    const inputs = {};
+    const val = (k) => (candidate ? candidate[k] ?? "" : "");
+    const field = ([k, label, type, required]) => {
+      let el;
+      if (type.startsWith("select:")) {
+        el = h("select", {}, editing ? null : h("option", { value: "" }, "（默认）"),
+          ...S.meta[type.slice(7)].map((o) => h("option", { value: o, selected: val(k) === o }, o)));
+      } else if (type.startsWith("list:")) {
+        el = h("input", { list: `dl-${k}`, value: val(k) });  // 岗位 / 渠道：可选常用值，也可自由填写
+      } else if (type === "textarea") {
+        el = h("textarea", { rows: 2 }, val(k));
+      } else {
+        const v = type === "datetime-local" ? String(val(k)).replace(" ", "T") : val(k);
+        el = h("input", { type, value: v });
+      }
+      inputs[k] = el;
+      return h("label", { class: type === "textarea" ? "full" : null }, h("span", {}, label, required ? h("span", { class: "req" }, " *") : null), el);
+    };
+    const warn = h("div", { class: "form-warn hidden" });
+    const err = h("span", { class: "form-err" });
+    const saveBtn = h("button", { class: "btn primary" }, "保存");
+    // 新建：只提交填了的字段；编辑：只提交改动过的字段（清空也算改动，后端会把该字段置空）
+    const original = (k) => (k === "interview_time" ? String(val(k)).replace(" ", "T") : String(val(k))).trim();
+    const collect = () => {
+      const f = {};
+      for (const [k] of FORM_FIELDS) {
+        const v = inputs[k].value.trim();
+        if (editing ? v !== original(k) : v) f[k] = v;
+      }
+      return f;
+    };
+    const submit = async (force = false) => {
+      err.textContent = "";
+      const fields = collect();
+      if (editing && !Object.keys(fields).length) { close(); return; }
+      saveBtn.disabled = true;
+      try {
+        const body = { fields, operator: OPERATOR, force, failure_id: failure?.id ?? null };
+        const r = editing ? await api(`/api/candidates/${candidate.id}`, { method: "PATCH", body })
+          : await api("/api/candidates", { method: "POST", body });
+        if (r.ok) { close(); toast(editing ? `已保存：${r.candidate.name}` : `已录入：${r.candidate.name}`); refreshAll(); return; }
+        if (r.duplicate) {
+          warn.replaceChildren(r.message, " ", h("button", { class: "btn sm", onclick: () => { close(); openForm({ candidate: r.duplicate, failure }); } }, "去编辑这条记录"));
+          warn.classList.remove("hidden");
+        } else if (r.needs_confirm) {
+          warn.replaceChildren(h("b", {}, "请确认以下风险："), h("ul", {}, ...r.reasons.map((x) => h("li", {}, x))));
+          warn.classList.remove("hidden");
+          saveBtn.textContent = "仍然保存";
+          saveBtn.onclick = () => submit(true);
+        }
+      } catch (e) { err.textContent = e.message; } finally { saveBtn.disabled = false; }
+    };
+    saveBtn.onclick = () => submit(false);
+    $("drawer-root").replaceChildren(
+      h("div", { class: "drawer-mask", onclick: close }),
+      h("div", { class: "modal", role: "dialog", "aria-label": editing ? "编辑候选人" : "手动录入候选人" },
+        h("div", { class: "modal-head" }, h("h2", {}, editing ? `编辑：${candidate.name}` : "手动录入候选人"),
+          h("span", { style: "color:var(--text-3);font-size:12px" }, "不经过 AI，仍会去重、校验并记录变更")),
+        h("div", { class: "modal-body" },
+          failure ? h("div", { class: "raw-ref" }, `原始内容（${failure.kind_label}）：\n${failure.raw_text}`) : null,
+          h("div", { class: "form-grid" }, ...FORM_FIELDS.map(field)),
+          h("datalist", { id: "dl-position" }, ...S.meta.positions.map((o) => h("option", { value: o }))),
+          h("datalist", { id: "dl-channel" }, ...S.meta.channels.map((o) => h("option", { value: o }))),
+          warn),
+        h("div", { class: "modal-foot" }, err, h("button", { class: "btn", onclick: close }, "取消"), saveBtn)));
+    inputs.name.focus();
+  }
+
+  /* ======================= 待人工处理 ======================= */
+  async function loadFailures() {
+    const { items } = await api("/api/failures");
+    S.failures = items;
+    const n = $("failure-count");
+    n.textContent = items.length;
+    n.classList.toggle("hidden", !items.length);
+    const op = async (path, ok) => {
+      try {
+        const r = await api(path, { method: "POST", body: { operator: OPERATOR } });
+        toast(r.ok === false ? r.text : ok);
+      } catch (e) { toast(e.message); }
+      refreshAll();
+    };
+    $("failures").replaceChildren(...(items.length ? items.map((f) => h("div", { class: "fail-item" },
+      h("div", { class: "meta" }, h("span", { class: "sev " + (f.kind === "sync" ? "warn" : "crit") }, f.kind_label),
+        h("span", { class: "tnum" }, shortTime(f.ts)), f.operator ? h("span", {}, f.operator) : null,
+        h("span", {}, { wecom: "企业微信", wecom_group: "企业微信", web: "网页", sync: "表格同步" }[f.source] || f.source || "")),
+      h("div", { class: "raw" }, f.raw_text || "（无内容）"),
+      f.error ? h("div", { class: "err" }, "原因：", f.error) : null,
+      h("div", { class: "ops" },
+        f.kind !== "sync" ? h("button", { class: "btn sm primary", onclick: () => openForm({ failure: f }) }, "✍️ 手动录入") : null,
+        f.retryable ? h("button", { class: "btn sm", onclick: () => op(`/api/failures/${f.id}/retry`, "已重试成功") }, "↻ 重试") : null,
+        h("button", { class: "btn sm", onclick: () => op(`/api/failures/${f.id}/resolve`, "已标记为处理完成") }, "标记已处理")))) :
+      [h("div", { class: "empty" }, "暂无待处理事项 🎉 系统出问题时，没处理成功的消息、文件和同步会出现在这里")]));
   }
 
   /* ======================= 跟进提醒 ======================= */
@@ -509,7 +618,7 @@
   let refreshing = null;
   async function refreshAll() {
     if (refreshing) return refreshing;
-    refreshing = Promise.all([loadMessages(), loadDashboard(), loadCandidates(), loadStatus()])
+    refreshing = Promise.all([loadMessages(), loadDashboard(), loadCandidates(), loadStatus(), loadFailures()])
       .catch((e) => console.error(e)).finally(() => (refreshing = null));
     return refreshing;
   }
@@ -558,6 +667,8 @@
       if (r) toast(r.pushed ? "日报已生成，并已推送到企微群" : "日报已生成（在企微群里 @招聘助手 一次，之后即可自动推送到该群）");
       refreshAll();
     };
+    $("btn-manual").onclick = () => openForm();
+    $("btn-manual-2").onclick = () => openForm();
     $("btn-reset").onclick = async () => {
       if (!confirm("恢复为初始演示数据？当前演示中新增的记录会被清空。")) return;
       await api("/api/reset", { method: "POST" });
@@ -575,7 +686,7 @@
     };
     document.querySelectorAll(".tab").forEach((t) => (t.onclick = () => {
       document.querySelectorAll(".tab").forEach((x) => x.classList.toggle("active", x === t));
-      ["dash", "table", "alerts"].forEach((n) => $("tab-" + n).classList.toggle("hidden", n !== t.dataset.tab));
+      ["dash", "table", "alerts", "manual"].forEach((n) => $("tab-" + n).classList.toggle("hidden", n !== t.dataset.tab));
       if (t.dataset.tab === "dash") Object.values(S.charts).forEach((c) => c.resize());
     }));
     ["f-q", "f-position", "f-stage", "f-status"].forEach((id) => $(id).addEventListener("input", renderSheet));

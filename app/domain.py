@@ -73,6 +73,16 @@ def match_dict(text: str, patterns: list[tuple[str, str]]) -> str | None:
     return None
 
 
+def normalize_phone(value: str | None) -> str | None:
+    """「138-0013-8000」「+86 138 0013 8000」→ 13800138000；不是 11 位手机号时原样保留（去掉空格）。"""
+    if not value:
+        return None
+    digits = re.sub(r"\D", "", str(value))
+    if len(digits) == 13 and digits.startswith("86"):
+        digits = digits[2:]
+    return digits if len(digits) == 11 and digits.startswith("1") else str(value).strip() or None
+
+
 def normalize_position(value: str | None) -> str | None:
     if not value:
         return None
