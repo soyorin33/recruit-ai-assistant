@@ -1,0 +1,6 @@
+# 直接用服务器 IP 通过 HTTP 访问（国内地域、域名还没备案时使用）。
+# 注意：HTTP 不加密，访问口令会明文传输；域名备案后请改用 Caddyfile（自动 HTTPS）。
+:80 {
+	encode gzip
+	reverse_proxy recruit-ai:8000
+}

@@ -1,6 +1,11 @@
-# 线上部署：应用 + MySQL + Caddy（自动 HTTPS）。由 deploy/deploy.sh 调用：
+# 线上部署：应用 + MySQL + Caddy。由 deploy/deploy.sh 调用：
 #   docker compose --env-file deploy/server.env -f deploy/docker-compose.prod.yml up -d --build
 # server.env 只保存在服务器上（访问口令、MySQL 密码），首次部署时随机生成，重新部署不会覆盖。
+# 两种访问方式（由 CADDYFILE 选择）：
+#   Caddyfile       域名 + 自动 HTTPS（默认，境外地域或已备案的域名）
+#   Caddyfile.http  直接用 IP 通过 HTTP 访问（国内地域、域名还没备案时）
+name: recruit
+
 services:
   mysql:
     image: mysql:8.4
@@ -21,7 +26,11 @@ services:
     restart: unless-stopped
 
   recruit-ai:
-    build: ..
+    build:
+      context: ..
+      args:
+        # 国内服务器设置 PIP_INDEX_URL=https://mirrors.cloud.tencent.com/pypi/simple 可加速依赖安装
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
     image: recruit-ai:latest
     env_file:
       - path: ../.env            # 大模型、企微、腾讯文档等配置（由部署脚本从本机复制）
@@ -45,7 +54,7 @@ services:
     environment:
       - DOMAIN=${DOMAIN:?请设置 DOMAIN}
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./${CADDYFILE:-Caddyfile}:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
     depends_on:
       - recruit-ai
